@@ -1,0 +1,94 @@
+// backend/routes/dashboard.js
+const express = require('express');
+const db      = require('../db');
+const { authMiddleware } = require('../middleware/auth');
+
+const router = express.Router();
+router.use(authMiddleware);
+
+// ── GET /api/dashboard ────────────────────────────────────
+router.get('/', async (req, res) => {
+  try {
+    const { role, department, empid } = req.user;
+    const full   = ['iqac','principal'].includes(role);
+    const dept   = (!full && department && department !== '—') ? department : null;
+    const isFac  = role === 'faculty';
+
+    // Build dept filter for queries
+    const deptFilter = dept ? 'AND department = ?' : '';
+    const deptParam  = dept ? [dept] : [];
+
+    // Faculty: return only their own data
+    if (isFac) {
+      const [[evRows]] = await db.query(
+        'SELECT COUNT(*) AS cnt, SUM(status="Approved") AS approved FROM events WHERE submitted_by = ?', [empid]
+      );
+      const [[attRows]] = await db.query(
+        'SELECT COUNT(*) AS cnt FROM events_attended WHERE submitted_by = ?', [empid]
+      );
+      const [myEvents] = await db.query(
+        'SELECT id, name, department, type, event_date, status FROM events WHERE submitted_by = ? ORDER BY created_at DESC', [empid]
+      );
+      const [myAtt] = await db.query(
+        'SELECT id, event_name, event_type, event_date, academic_year FROM events_attended WHERE submitted_by = ? ORDER BY created_at DESC', [empid]
+      );
+      return res.json({
+        role: 'faculty',
+        stats: { events: evRows.cnt, attended: attRows.cnt, approved: evRows.approved || 0 },
+        myEvents,
+        myAttended: myAtt
+      });
+    }
+
+    // iqac_dept: only approved events from their dept
+    const eventFilter = role === 'iqac_dept'
+      ? `WHERE status='Approved' ${dept ? 'AND department=?' : ''}`
+      : `WHERE 1=1 ${deptFilter}`;
+    const eventParams = role === 'iqac_dept' ? [...deptParam] : [...deptParam];
+
+    const [[evStats]] = await db.query(
+      `SELECT COUNT(*) AS total, SUM(status='Approved') AS approved, SUM(status LIKE 'Pending%') AS pending FROM events ${eventFilter}`,
+      eventParams
+    );
+    const [[facStats]] = await db.query(
+      `SELECT COUNT(*) AS total FROM faculty WHERE 1=1 ${deptFilter}`, deptParam
+    );
+    const [[attStats]] = await db.query(
+      `SELECT COUNT(*) AS total FROM events_attended WHERE 1=1 ${deptFilter}`, deptParam
+    );
+
+    // Per-dept breakdown
+    const DEPTS = ['CSE','ISE','ECE','AIML','ME','Humanities','Physics','Chemistry','Maths'];
+    const targetDepts = dept ? [dept] : DEPTS;
+
+    const [evByDept]  = await db.query(`SELECT department, COUNT(*) AS cnt FROM events WHERE 1=1 ${deptFilter} GROUP BY department`, deptParam);
+    const [facByDept] = await db.query(`SELECT department, COUNT(*) AS cnt FROM faculty WHERE 1=1 ${deptFilter} GROUP BY department`, deptParam);
+    const [attByDept] = await db.query(`SELECT department, COUNT(*) AS cnt FROM events_attended WHERE 1=1 ${deptFilter} GROUP BY department`, deptParam);
+    const [evByType]  = await db.query(`SELECT type, COUNT(*) AS cnt FROM events WHERE 1=1 ${deptFilter} GROUP BY type`, deptParam);
+    const [evByStatus]= await db.query(`SELECT status, COUNT(*) AS cnt FROM events GROUP BY status`);
+
+    const toMap = (rows) => Object.fromEntries(rows.map(r => [r.department || r.type || r.status, r.cnt]));
+
+    res.json({
+      role,
+      stats: {
+        events:   evStats.total  || 0,
+        approved: evStats.approved || 0,
+        pending:  evStats.pending  || 0,
+        faculty:  facStats.total || 0,
+        attended: attStats.total || 0
+      },
+      depts:    targetDepts,
+      evByDept: toMap(evByDept),
+      facByDept:toMap(facByDept),
+      attByDept:toMap(attByDept),
+      evByType: toMap(evByType),
+      evByStatus: toMap(evByStatus)
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to load dashboard' });
+  }
+});
+
+module.exports = router;
