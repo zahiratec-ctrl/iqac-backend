@@ -7,7 +7,7 @@ const path    = require('path');
 const fs      = require('fs');
 
 const app  = express();
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 8080;
 
 // ── CORS ─────────────────────────────────────────────────
 const allowedOrigins = (process.env.CLIENT_ORIGIN || '')
@@ -38,6 +38,14 @@ app.use('/api/attended',  require('./routes/attended'));
 app.use('/api/faculty',   require('./routes/faculty'));
 app.use('/api/users',     require('./routes/users'));
 app.use('/api/dashboard', require('./routes/dashboard'));
+
+app.get('/', (_req, res) => {
+  res.send('IQAC Backend Running Successfully');
+});
+
+app.get('/api', (_req, res) => {
+  res.json({ message: 'IQAC API Working' });
+});
 
 app.get('/api/health', (_req, res) =>
   res.json({ status: 'ok', timestamp: new Date().toISOString() })
