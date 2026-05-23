@@ -48,7 +48,7 @@ router.get('/:id', async (req, res) => {
 
 // ── POST /api/faculty ─────────────────────────────────────
 router.post('/',
-  requireRole('hod','iqac','iqac_dept','principal'),
+  requireRole('faculty','hod','iqac','iqac_dept','principal'),
   upload.fields(DOC_FIELDS),
   async (req, res) => {
     try {
