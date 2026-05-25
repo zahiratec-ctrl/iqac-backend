@@ -166,13 +166,16 @@ router.delete('/:id',
 // ── GET /api/faculty/:id/docs/:docType ────────────────────
 // Download a specific document (HOD/IQAC/iqac_dept/principal only)
 router.get('/:id/docs/:docType',
-  requireRole('hod','iqac','iqac_dept','principal'),
+     requireRole('faculty','hod','iqac','iqac_dept','principal'),
   async (req, res) => {
     try {
       const [rows] = await db.query('SELECT * FROM faculty WHERE id = ?', [req.params.id]);
       if (!rows.length) return res.status(404).json({ error: 'Faculty not found' });
 
       const fac = rows[0];
+      if (req.user.role === 'faculty' && fac.empid !== req.user.empid) {
+     return res.status(403).json({ error: 'Insufficient permissions' });
+       }
       const validTypes = { doc_appt:1, doc_pan:1, doc_aadhar:1, doc_resume:1 };
       if (!validTypes[req.params.docType])
         return res.status(400).json({ error: 'Invalid document type' });
@@ -191,5 +194,48 @@ router.get('/:id/docs/:docType',
     }
   }
 );
+// ── DELETE /api/faculty/:id/docs/:docType ─────────────────
+router.delete('/:id/docs/:docType',
+  requireRole('faculty','hod','iqac','iqac_dept','principal'),
+  async (req, res) => {
+    try {
+      const { id, docType } = req.params;
 
+      const validTypes = {
+        doc_appt: 1,
+        doc_pan: 1,
+        doc_aadhar: 1,
+        doc_resume: 1
+      };
+
+      if (!validTypes[docType]) {
+        return res.status(400).json({ error: 'Invalid document type' });
+      }
+
+      const [rows] = await db.query('SELECT * FROM faculty WHERE id = ?', [id]);
+      if (!rows.length) return res.status(404).json({ error: 'Faculty not found' });
+
+      const fac = rows[0];
+
+      if (req.user.role === 'faculty' && fac.empid !== req.user.empid) {
+        return res.status(403).json({ error: 'Insufficient permissions' });
+      }
+
+      const filename = fac[docType];
+
+      if (filename && filename !== '—') {
+        const filePath = path.join(process.env.UPLOAD_DIR || './uploads', filename);
+        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+      }
+
+      await db.query(`UPDATE faculty SET ${docType} = '—' WHERE id = ?`, [id]);
+
+      res.json({ message: 'Document deleted successfully' });
+
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Failed to delete document' });
+    }
+  }
+);
 module.exports = router;
