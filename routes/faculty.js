@@ -146,9 +146,15 @@ router.delete('/:id',
 
       // Clean up uploaded files
       const fac  = rows[0];
-      if (req.user.role === 'faculty' && String(fac.empid) !== String(req.user.empid)) {
-      return res.status(403).json({ error: 'Insufficient permissions' });
-      }
+      const loggedEmpid = String(req.user.empid || req.user.employee_id || req.user.id || '').trim();
+
+if (
+  req.user.role === 'faculty' &&
+  String(fac.empid || '').trim() !== loggedEmpid &&
+  String(fac.created_by || '').trim() !== loggedEmpid
+) {
+  return res.status(403).json({ error: 'Insufficient permissions' });
+}
       const base = process.env.UPLOAD_DIR || './uploads';
       const filesToDelete = [fac.doc_appt, fac.doc_pan, fac.doc_aadhar, fac.doc_resume,
         ...(JSON.parse(fac.doc_exp_certs || '[]'))].filter(f => f && f !== '—');
