@@ -38,6 +38,7 @@ app.use('/api/attended',  require('./routes/attended'));
 app.use('/api/faculty',   require('./routes/faculty'));
 app.use('/api/users',     require('./routes/users'));
 app.use('/api/dashboard', require('./routes/dashboard'));
+app.use('/api/accreditations', require('./routes/accreditations'));
 
 app.get('/', (_req, res) => {
   res.send('IQAC Backend Running Successfully');
