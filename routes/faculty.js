@@ -138,7 +138,7 @@ router.put('/:id',
 
 // ── DELETE /api/faculty/:id ───────────────────────────────
 router.delete('/:id',
-  requireRole('hod','iqac','iqac_dept','principal'),
+  requireRole('faculty','hod','iqac','iqac_dept','principal'),
   async (req, res) => {
     try {
       const [rows] = await db.query('SELECT * FROM faculty WHERE id = ?', [req.params.id]);
@@ -146,6 +146,9 @@ router.delete('/:id',
 
       // Clean up uploaded files
       const fac  = rows[0];
+      if (req.user.role === 'faculty' && String(fac.empid) !== String(req.user.empid)) {
+      return res.status(403).json({ error: 'Insufficient permissions' });
+      }
       const base = process.env.UPLOAD_DIR || './uploads';
       const filesToDelete = [fac.doc_appt, fac.doc_pan, fac.doc_aadhar, fac.doc_resume,
         ...(JSON.parse(fac.doc_exp_certs || '[]'))].filter(f => f && f !== '—');
