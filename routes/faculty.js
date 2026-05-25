@@ -156,12 +156,22 @@ if (
   return res.status(403).json({ error: 'Insufficient permissions' });
 }
       const base = process.env.UPLOAD_DIR || './uploads';
-      const filesToDelete = [fac.doc_appt, fac.doc_pan, fac.doc_aadhar, fac.doc_resume,
-        ...(JSON.parse(fac.doc_exp_certs || '[]'))].filter(f => f && f !== '—');
-      filesToDelete.forEach(f => {
-        const fp = path.join(base, f);
-        if (fs.existsSync(fp)) fs.unlinkSync(fp);
-      });
+
+let expCerts = [];
+try {
+  expCerts = JSON.parse(fac.doc_exp_certs || '[]');
+  if (!Array.isArray(expCerts)) expCerts = [];
+} catch (e) {
+  expCerts = [];
+}
+
+const filesToDelete = [
+  fac.doc_appt,
+  fac.doc_pan,
+  fac.doc_aadhar,
+  fac.doc_resume,
+  ...expCerts
+].filter(f => f && f !== '—');
 
       await db.query('DELETE FROM faculty WHERE id = ?', [req.params.id]);
       res.json({ message: 'Faculty profile deleted' });
@@ -226,7 +236,11 @@ router.delete('/:id/docs/:docType',
 
       const fac = rows[0];
 
-      if (req.user.role === 'faculty' && fac.empid !== req.user.empid) {
+      if (
+  req.user.role === 'faculty' &&
+  String(fac.empid || '').trim() !== String(req.user.empid || '').trim() &&
+  String(fac.created_by || '').trim() !== String(req.user.empid || '').trim()
+) {
         return res.status(403).json({ error: 'Insufficient permissions' });
       }
 
