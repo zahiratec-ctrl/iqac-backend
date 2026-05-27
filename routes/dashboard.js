@@ -58,7 +58,7 @@ router.get('/', async (req, res) => {
     );
 
     // Per-dept breakdown
-    const DEPTS = ['CSE','ISE','ECE','AIML','ME','Humanities','Physics','Chemistry','Maths'];
+    const DEPTS = ['CSE','ISE','ECE','AIML','ME','Humanities','Physics','Chemistry','Maths','IQAC'];
     const targetDepts = dept ? [dept] : DEPTS;
 
     const [evByDept]  = await db.query(`SELECT department, COUNT(*) AS cnt FROM events WHERE 1=1 ${deptFilter} GROUP BY department`, deptParam);
@@ -67,7 +67,27 @@ router.get('/', async (req, res) => {
     const [evByType]  = await db.query(`SELECT type, COUNT(*) AS cnt FROM events WHERE 1=1 ${deptFilter} GROUP BY type`, deptParam);
     const [evByStatus]= await db.query(`SELECT status, COUNT(*) AS cnt FROM events GROUP BY status`);
 
+    const [evDeptTypeRows] = await db.query(
+  `SELECT department, type, COUNT(*) AS cnt
+   FROM events
+   WHERE 1=1 ${deptFilter}
+   GROUP BY department, type`,
+  deptParam
+);
+
+// convert rows into nested object
+const evByDeptType = {};
+
+evDeptTypeRows.forEach(r => {
+  if (!evByDeptType[r.department]) {
+    evByDeptType[r.department] = {};
+  }
+
+  evByDeptType[r.department][r.type] = r.cnt;
+});
+
     const toMap = (rows) => Object.fromEntries(rows.map(r => [r.department || r.type || r.status, r.cnt]));
+
 
     res.json({
       role,
@@ -79,11 +99,12 @@ router.get('/', async (req, res) => {
         attended: attStats.total || 0
       },
       depts:    targetDepts,
-      evByDept: toMap(evByDept),
-      facByDept:toMap(facByDept),
-      attByDept:toMap(attByDept),
-      evByType: toMap(evByType),
-      evByStatus: toMap(evByStatus)
+     evByDept: toMap(evByDept),
+     facByDept:toMap(facByDept),
+     attByDept:toMap(attByDept),
+     evByType: toMap(evByType),
+     evByStatus: toMap(evByStatus),
+     evByDeptType
     });
   } catch (err) {
     console.error(err);
