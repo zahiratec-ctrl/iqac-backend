@@ -81,6 +81,13 @@ router.post('/', upload.fields([
 
     const brochure    = req.files?.brochure?.[0]?.filename    || '—';
     const budget_file = req.files?.budget_file?.[0]?.filename || '—';
+    const initialStatus =
+    department === 'IQAC' ? 'Pending Principal' : 'Pending HOD';
+
+     const approvalMessage =
+    department === 'IQAC'
+    ? 'Event submitted directly for Principal approval'
+    : 'Event submitted for HOD approval';
 
     const [result] = await db.query(`
       INSERT INTO events
@@ -91,9 +98,9 @@ router.post('/', upload.fields([
       [name, department, type, beneficiary, parseInt(participants)||0,
        event_date||null, academic_year, coordinator, remarks||'',
        brochure, budget_file, parseFloat(budget_total)||0,
-       budget_rows || '[]', 'Pending HOD', req.user.empid]
+       budget_rows || '[]', initialStatus, req.user.empid]
     );
-    res.status(201).json({ id: result.insertId, message: 'Event submitted for HOD approval' });
+    res.status(201).json({ id: result.insertId, message: approvalMessage });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to create event' });
