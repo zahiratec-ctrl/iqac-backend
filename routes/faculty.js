@@ -96,7 +96,7 @@ router.post('/',
 
 // ── PUT /api/faculty/:id ──────────────────────────────────
 router.put('/:id',
-  requireRole('hod','iqac','iqac_dept','principal'),
+  requireRole('faculty','hod','iqac','iqac_dept','principal'),
   upload.fields(DOC_FIELDS),
   async (req, res) => {
     try {
