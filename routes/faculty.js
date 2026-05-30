@@ -97,6 +97,7 @@ router.post('/',
 // ── PUT /api/faculty/:id ──────────────────────────────────
 router.put('/:id',
   requireRole('hod','iqac','iqac_dept','principal'),
+  upload.fields(DOC_FIELDS),
   async (req, res) => {
     try {
       const {
@@ -105,15 +106,52 @@ router.put('/:id',
         aadhar_no, pan_no, teaching_exp, research_exp, industry_exp
       } = req.body;
 
-      if (!name || !department || !empid || !designation)
-        return res.status(400).json({ error: 'name, department, empid and designation are required' });
+      if (!name || !department || !empid || !designation) {
+        return res.status(400).json({
+          error: 'name, department, empid and designation are required'
+        });
+      }
 
-      // Check empid conflict with other records
       const [conflict] = await db.query(
-        'SELECT id FROM faculty WHERE empid = ? AND id != ?', [empid, req.params.id]
+        'SELECT id FROM faculty WHERE empid = ? AND id != ?',
+        [empid, req.params.id]
       );
-      if (conflict.length)
-        return res.status(409).json({ error: 'Another faculty already has this Employee ID' });
+
+      if (conflict.length) {
+        return res.status(409).json({
+          error: 'Another faculty already has this Employee ID'
+        });
+      }
+
+      const files = req.files || {};
+
+      const docAppt   = files.doc_appt?.[0]?.filename;
+      const docPan    = files.doc_pan?.[0]?.filename;
+      const docAadhar = files.doc_aadhar?.[0]?.filename;
+      const docResume = files.doc_resume?.[0]?.filename;
+
+      let docSql = '';
+      const docParams = [];
+
+      if (docAppt) {
+        docSql += ', doc_appt=?';
+        docParams.push(docAppt);
+      }
+
+      if (docPan) {
+        docSql += ', doc_pan=?';
+        docParams.push(docPan);
+      }
+
+      if (docAadhar) {
+        docSql += ', doc_aadhar=?';
+        docParams.push(docAadhar);
+      }
+
+      if (docResume) {
+        docSql += ', doc_resume=?';
+        docParams.push(docResume);
+      }
 
       await db.query(`
         UPDATE faculty SET
@@ -121,14 +159,22 @@ router.put('/:id',
           dob=?, doj=?, dor=?, emp_status=?,
           qualification=?, specialization=?, aadhar_no=?, pan_no=?,
           teaching_exp=?, research_exp=?, industry_exp=?
+          ${docSql}
         WHERE id=?`,
-        [name, department, empid, phone||'', designation,
-         dob||null, doj||null, dor||null, emp_status||'serving',
-         qualification||'', specialization||'', aadhar_no||'', pan_no||'',
-         parseInt(teaching_exp)||0, parseInt(research_exp)||0, parseInt(industry_exp)||0,
-         req.params.id]
+        [
+          name, department, empid, phone || '', designation,
+          dob || null, doj || null, dor || null, emp_status || 'serving',
+          qualification || '', specialization || '', aadhar_no || '', pan_no || '',
+          parseInt(teaching_exp) || 0,
+          parseInt(research_exp) || 0,
+          parseInt(industry_exp) || 0,
+          ...docParams,
+          req.params.id
+        ]
       );
+
       res.json({ message: 'Faculty profile updated' });
+
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'Failed to update faculty profile' });
