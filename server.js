@@ -8,6 +8,7 @@ const fs      = require('fs');
 
 const app  = express();
 const PORT = process.env.PORT || 8080;
+app.use('/api/faculty', require('./routes/faculty'));
 
 // ── CORS ─────────────────────────────────────────────────
 const allowedOrigins = (process.env.CLIENT_ORIGIN || '')
@@ -39,6 +40,7 @@ app.use('/api/faculty',   require('./routes/faculty'));
 app.use('/api/users',     require('./routes/users'));
 app.use('/api/dashboard', require('./routes/dashboard'));
 app.use('/api/accreditations', require('./routes/accreditations'));
+app.use('/api/intelligence', require('./routes/intelligence'));
 
 app.get('/', (_req, res) => {
   res.send('IQAC Backend Running Successfully');
