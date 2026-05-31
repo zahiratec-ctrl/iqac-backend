@@ -107,26 +107,68 @@ router.post('/', upload.fields([
   }
 });
 
-// ── PATCH /api/events/:id/approve ────────────────────────
+/// ── PATCH /api/events/:id/approve ────────────────────────
 router.patch('/:id/approve', async (req, res) => {
   try {
+    const { remarks } = req.body;
+
     const [rows] = await db.query('SELECT * FROM events WHERE id = ?', [req.params.id]);
     if (!rows.length) return res.status(404).json({ error: 'Event not found' });
 
-    const ev      = rows[0];
-    const role    = req.user.role;
-    const dept    = req.user.department;
-    const flow    = { 'Pending HOD': 'Pending IQAC', 'Pending IQAC': 'Pending Principal', 'Pending Principal': 'Approved' };
-    const allowed = { 'Pending HOD': 'hod', 'Pending IQAC': 'iqac', 'Pending Principal': 'principal' };
+    const ev   = rows[0];
+    const role = req.user.role;
+    const dept = req.user.department;
 
-    if (allowed[ev.status] !== role)
-      return res.status(403).json({ error: `Only ${allowed[ev.status]} can approve at this stage` });
-    if (['hod','iqac'].includes(role) && dept !== '—' && ev.department !== dept)
-      return res.status(403).json({ error: 'You can only approve events from your department' });
+    const flow = {
+      'Pending HOD': 'Pending IQAC',
+      'Pending IQAC': 'Pending Principal',
+      'Pending Principal': 'Approved'
+    };
+
+    const allowed = {
+      'Pending HOD': 'hod',
+      'Pending IQAC': 'iqac',
+      'Pending Principal': 'principal'
+    };
+
+    if (allowed[ev.status] !== role) {
+      return res.status(403).json({
+        error: `Only ${allowed[ev.status]} can approve at this stage`
+      });
+    }
+
+    if (['hod','iqac'].includes(role) && dept !== '—' && ev.department !== dept) {
+      return res.status(403).json({
+        error: 'You can only approve events from your department'
+      });
+    }
+
+    let remarkColumn = '';
+
+    if (role === 'hod') remarkColumn = 'hod_remarks';
+    if (role === 'iqac') remarkColumn = 'iqac_remarks';
+    if (role === 'principal') remarkColumn = 'principal_remarks';
 
     const nextStatus = flow[ev.status] || 'Approved';
-    await db.query('UPDATE events SET status = ? WHERE id = ?', [nextStatus, ev.id]);
-    res.json({ message: `Event moved to: ${nextStatus}`, status: nextStatus });
+
+    const finalRemarks =
+      `${role.toUpperCase()} approved: ${remarks || 'No remarks'}`;
+
+    await db.query(
+      `UPDATE events
+       SET status = ?,
+           ${remarkColumn} = ?,
+           final_remarks = ?
+       WHERE id = ?`,
+      [nextStatus, remarks || '', finalRemarks, ev.id]
+    );
+
+    res.json({
+      message: `Event moved to: ${nextStatus}`,
+      status: nextStatus,
+      remarks: finalRemarks
+    });
+
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to approve event' });
@@ -136,11 +178,61 @@ router.patch('/:id/approve', async (req, res) => {
 // ── PATCH /api/events/:id/reject ─────────────────────────
 router.patch('/:id/reject', async (req, res) => {
   try {
-    await db.query("UPDATE events SET status = 'Rejected' WHERE id = ?", [req.params.id]);
-    res.json({ message: 'Event rejected', status: 'Rejected' });
+    const { remarks } = req.body;
+
+    const [rows] = await db.query('SELECT * FROM events WHERE id = ?', [req.params.id]);
+    if (!rows.length) return res.status(404).json({ error: 'Event not found' });
+
+    const ev   = rows[0];
+    const role = req.user.role;
+    const dept = req.user.department;
+
+    const allowed = {
+      'Pending HOD': 'hod',
+      'Pending IQAC': 'iqac',
+      'Pending Principal': 'principal'
+    };
+
+    if (allowed[ev.status] !== role) {
+      return res.status(403).json({
+        error: `Only ${allowed[ev.status]} can reject at this stage`
+      });
+    }
+
+    if (['hod','iqac'].includes(role) && dept !== '—' && ev.department !== dept) {
+      return res.status(403).json({
+        error: 'You can only reject events from your department'
+      });
+    }
+
+    let remarkColumn = '';
+
+    if (role === 'hod') remarkColumn = 'hod_remarks';
+    if (role === 'iqac') remarkColumn = 'iqac_remarks';
+    if (role === 'principal') remarkColumn = 'principal_remarks';
+
+    const finalRemarks =
+      `${role.toUpperCase()} rejected: ${remarks || 'No remarks'}`;
+
+    await db.query(
+      `UPDATE events
+       SET status = 'Rejected',
+           ${remarkColumn} = ?,
+           rejected_by = ?,
+           final_remarks = ?
+       WHERE id = ?`,
+      [remarks || '', role, finalRemarks, ev.id]
+    );
+
+    res.json({
+      message: 'Event rejected',
+      status: 'Rejected',
+      remarks: finalRemarks
+    });
+
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: 'Failed to reject event' });
   }
 });
-
 module.exports = router;
