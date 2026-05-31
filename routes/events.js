@@ -235,4 +235,39 @@ router.patch('/:id/reject', async (req, res) => {
     res.status(500).json({ error: 'Failed to reject event' });
   }
 });
+router.get('/:id/docs/:type', async (req, res) => {
+  try {
+    const { id, type } = req.params;
+
+    const [rows] = await db.query('SELECT brochure_file, budget_file FROM events WHERE id=?', [id]);
+
+    if (!rows.length) {
+      return res.status(404).json({ error: 'Event not found' });
+    }
+
+    let filename = null;
+
+    if (type === 'brochure') filename = rows[0].brochure_file;
+    if (type === 'budget') filename = rows[0].budget_file;
+
+    if (!filename || filename === '—') {
+      return res.status(404).json({ error: 'Document not uploaded' });
+    }
+
+    const path = require('path');
+    const fs = require('fs');
+
+    const filePath = path.join(process.env.UPLOAD_DIR || 'uploads', filename);
+
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'File missing on server. Please re-upload document.' });
+    }
+
+    return res.sendFile(path.resolve(filePath));
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Unable to view document' });
+  }
+});
 module.exports = router;
