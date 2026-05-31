@@ -27,10 +27,25 @@ router.get('/', async (req, res) => {
         'SELECT COUNT(*) AS cnt FROM events_attended WHERE submitted_by = ?', [empid]
       );
       const [myEvents] = await db.query(
-        'SELECT id, name, department, type, event_date, status FROM events WHERE submitted_by = ? ORDER BY created_at DESC', [empid]
-      );
+  `SELECT 
+     id, 
+     name, 
+     department, 
+     type, 
+     event_date, 
+     status,
+     hod_remarks,
+     iqac_remarks,
+     principal_remarks,
+     final_remarks,
+     rejected_by
+   FROM events 
+   WHERE submitted_by = ? 
+   ORDER BY created_at DESC`,
+  [empid]
+);
       const [myAtt] = await db.query(
-        'SELECT id, event_name, event_type, event_date, academic_year FROM events_attended WHERE submitted_by = ? ORDER BY created_at DESC', [empid]
+        'SELECT id, event_name, event_type, event_da'SELECT id, name, department, type, event_date, status FROM events WHERE submitted_by = ? ORDER BY created_at DESC', [empid]te, academic_year FROM events_attended WHERE submitted_by = ? ORDER BY created_at DESC', [empid]
       );
       return res.json({
         role: 'faculty',
