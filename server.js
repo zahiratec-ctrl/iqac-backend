@@ -9,8 +9,9 @@ const fs = require('fs');
 const app = express();
 const PORT = process.env.PORT || 8080;
 
+// ── CORS & PREFLIGHT HANDLING ───────────────────────────
 app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', 'https://zahiratec-ctrl.github.io');
+  res.header('Access-Control-Allow-Origin', 'https://github.io');
   res.header('Access-Control-Allow-Credentials', 'true');
   res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Content-Type,Authorization');
@@ -22,7 +23,6 @@ app.use((req, res, next) => {
   next();
 });
 
-// ── CORS ─────────────────────────────────────────────────
 const envOrigins = (process.env.CLIENT_ORIGIN || '')
   .split(',')
   .map(s => s.trim())
@@ -30,7 +30,7 @@ const envOrigins = (process.env.CLIENT_ORIGIN || '')
 
 const allowedOrigins = [
   ...envOrigins,
-  'https://zahiratec-ctrl.github.io',
+  'https://github.io',
   'http://localhost:3000',
   'http://localhost:5000',
   'http://localhost:5500',
@@ -117,7 +117,7 @@ app.use((err, _req, res, _next) => {
 });
 
 // ── START SERVER ─────────────────────────────────────────
-console.log('SERVER VERSION 03-JUNE-2026');
+console.log('SERVER RESTORED — READY');
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`IQAC Portal running on port ${PORT}`);
 });
