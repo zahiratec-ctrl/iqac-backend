@@ -1,143 +1,58 @@
-// backend/routes/auth.js
-const express = require('express');
-const bcrypt  = require('bcrypt');
-const jwt     = require('jsonwebtoken');
-const { v4: uuidv4 } = require('uuid');
-const db      = require('../db');
-const { authMiddleware } = require('../middleware/auth');
+// backend/middleware/auth.js
 
-const router = express.Router();
-const SALT_ROUNDS = 12;
+const jwt = require('jsonwebtoken');
 
-// ── POST /api/auth/register ──────────────────────────────
-router.post('/register', async (req, res) => {
-  try {
-    const { empid, email, role, department, password } = req.body;
-    if (!empid || !email || !role || !password)
-      return res.status(400).json({ error: 'empid, email, role and password are required' });
-    if (password.length < 8)
-      return res.status(400).json({ error: 'Password must be at least 8 characters' });
+function authMiddleware(req, res, next) {
+  console.log('AUTH MIDDLEWARE:', req.method, req.originalUrl);
 
-    const [existing] = await db.query(
-      'SELECT id FROM users WHERE empid = ? OR email = ?', [empid, email]
-    );
-    if (existing.length)
-      return res.status(409).json({ error: 'Employee ID or Email already registered' });
-
-    const hash = await bcrypt.hash(password, SALT_ROUNDS);
-    await db.query(
-      'INSERT INTO users (empid, email, role, department, password_hash) VALUES (?,?,?,?,?)',
-      [empid, email, role, department || '—', hash]
-    );
-    res.status(201).json({ message: 'Account created successfully' });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Server error during registration' });
+  // ✅ OPTIONS preflight – respond immediately, do NOT call next()
+  if (req.method === 'OPTIONS') {
+    console.log('OPTIONS BYPASSED – sending 204');
+    return res.sendStatus(204);
   }
-});
 
-// ── POST /api/auth/login ─────────────────────────────────
-router.post('/login', async (req, res) => {
+  console.log('AUTH HEADER =', req.headers['authorization']);
+  const header = req.headers['authorization'];
+
+  if (!header) {
+    console.log('NO TOKEN');
+    return res.status(401).json({ error: 'No token provided' });
+  }
+
+  const token = header.startsWith('Bearer ')
+    ? header.slice(7)
+    : header;
+
   try {
-    const { empid, password } = req.body;
-    if (!empid || !password)
-      return res.status(400).json({ error: 'empid and password are required' });
+    console.log('TOKEN RECEIVED =', token.substring(0, 20));
+    req.user = jwt.verify(token, process.env.JWT_SECRET);
+    console.log('JWT VERIFIED =', req.user);
+    next();
+  } catch (err) {
+    console.log('JWT ERROR =', err.message);
+    return res.status(401).json({ error: 'Invalid or expired token' });
+  }
+}
 
-    const [rows] = await db.query(
-      'SELECT * FROM users WHERE empid = ?', [empid]
-    );
-    if (!rows.length)
-      return res.status(401).json({ error: 'No account found with this Employee ID' });
+// Role-based access control middleware
+function requireRole(...allowedRoles) {
+  return (req, res, next) => {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
 
-    const user = rows[0];
-    const match = await bcrypt.compare(password, user.password_hash);
-    if (!match)
-      return res.status(401).json({ error: 'Incorrect password' });
+    const userRole = String(req.user.role || '').toLowerCase();
+    if (allowedRoles.map(r => r.toLowerCase()).includes(userRole)) {
+      return next();
+    }
 
-    const token = jwt.sign(
-      { id: user.id, empid: user.empid, role: user.role, department: user.department },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRES_IN || '8h' }
-    );
-    res.json({
-      token,
-      user: { id: user.id, empid: user.empid, email: user.email, role: user.role, department: user.department }
+    return res.status(403).json({
+      error: `Access denied. Required roles: ${allowedRoles.join(', ')}`
     });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Server error during login' });
-  }
-});
+  };
+}
 
-// ── POST /api/auth/forgot-password ──────────────────────
-router.post('/forgot-password', async (req, res) => {
-  try {
-    const { empid, email } = req.body;
-    if (!empid || !email)
-      return res.status(400).json({ error: 'empid and email are required' });
-
-    const [rows] = await db.query(
-      'SELECT id FROM users WHERE empid = ? AND email = ?', [empid, email]
-    );
-    if (!rows.length)
-      return res.status(404).json({ error: 'No account found with this Employee ID and Email' });
-
-    // Delete any existing unused tokens for this user
-    await db.query('DELETE FROM password_resets WHERE empid = ?', [empid]);
-
-    const token   = uuidv4();
-    const expires = new Date(Date.now() + 30 * 60 * 1000); // 30 min
-    await db.query(
-      'INSERT INTO password_resets (empid, token, expires_at) VALUES (?,?,?)',
-      [empid, token, expires]
-    );
-    // In production: send token via email. For this demo we return it directly.
-    res.json({ message: 'Verification successful', reset_token: token });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// ── POST /api/auth/reset-password ───────────────────────
-router.post('/reset-password', async (req, res) => {
-  try {
-    const { token, password } = req.body;
-    if (!token || !password)
-      return res.status(400).json({ error: 'token and password are required' });
-    if (password.length < 8)
-      return res.status(400).json({ error: 'Password must be at least 8 characters' });
-
-    const [rows] = await db.query(
-      'SELECT * FROM password_resets WHERE token = ? AND used = 0 AND expires_at > NOW()',
-      [token]
-    );
-    if (!rows.length)
-      return res.status(400).json({ error: 'Reset token is invalid or has expired' });
-
-    const hash = await bcrypt.hash(password, SALT_ROUNDS);
-    await db.query('UPDATE users SET password_hash = ? WHERE empid = ?', [hash, rows[0].empid]);
-    await db.query('UPDATE password_resets SET used = 1 WHERE token = ?', [token]);
-
-    res.json({ message: 'Password reset successfully' });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// ── GET /api/auth/me ─────────────────────────────────────
-router.get('/me', authMiddleware, async (req, res) => {
-  try {
-    const [rows] = await db.query(
-      'SELECT id, empid, email, role, department, created_at FROM users WHERE id = ?',
-      [req.user.id]
-    );
-    if (!rows.length) return res.status(404).json({ error: 'User not found' });
-    res.json(rows[0]);
-  } catch (err) {
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-module.exports = router;
+module.exports = {
+  authMiddleware,
+  requireRole
+};

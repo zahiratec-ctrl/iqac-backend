@@ -7,6 +7,10 @@ const db      = require('../db');
 const { authMiddleware, requireRole } = require('../middleware/auth');
 
 const router = express.Router();
+router.use((req, res, next) => {
+  console.log('FACULTY ROUTER:', req.method, req.originalUrl);
+  next();
+});
 router.use(authMiddleware);
 
 const DOC_FIELDS = [
@@ -18,20 +22,47 @@ const DOC_FIELDS = [
 ];
 
 // ── GET /api/faculty ──────────────────────────────────────
-router.get('/', async (req, res) => {
+
+  router.get('/', async (req, res) => {
+
+  console.log('FACULTY ROUTE HIT');
+  console.log('USER =', req.user);
+    
   try {
-    const { role, department } = req.user;
-    let where = '', params = [];
-    if (['hod','iqac','iqac_dept'].includes(role) && department && department !== '—') {
-      where = 'WHERE department = ?'; params = [department];
+
+    if (!req.user) {
+      return res.status(401).json({
+        error: 'User not authenticated'
+      });
     }
+
+    const role = String(req.user.role || '').toLowerCase();
+    const department = req.user.department || '';
+
+    let where = '';
+    let params = [];
+
+    if (
+      ['hod','iqac_dept'].includes(role) &&
+      department &&
+      department !== '—'
+    ) {
+      where = 'WHERE department = ?';
+      params = [department];
+    }
+
     const [rows] = await db.query(
-      `SELECT * FROM faculty ${where} ORDER BY name ASC`, params
+      `SELECT * FROM faculty ${where} ORDER BY name ASC`,
+      params
     );
+
     res.json(rows);
+
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to fetch faculty' });
+    console.error('FACULTY GET ERROR:', err);
+    res.status(500).json({
+      error: err.message
+    });
   }
 });
 
