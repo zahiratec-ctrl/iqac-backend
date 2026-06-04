@@ -9,11 +9,10 @@ const fs = require('fs');
 const app = express();
 const PORT = process.env.PORT || 8080;
 
-/// ── CORS & PREFLIGHT HANDLING ───────────────────────────
+// ── CORS & PREFLIGHT HANDLING ───────────────────────────
 app.use((req, res, next) => {
   const origin = req.headers.origin;
   
-  // Dynamically check and approve requests from your frontend domains
   if (origin && (
     origin.startsWith('https://github.io') || 
     origin.includes('localhost') || 
@@ -55,16 +54,6 @@ const corsOptions = {
     if (allowedOrigins.includes(origin)) {
       return callback(null, true);
     }
-    return callback(new Error('CORS blocked: ' + origin));
-  },
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-};
-
-app.use(cors(corsOptions));
-app.options(/.*/, cors(corsOptions));
-
     return callback(new Error('CORS blocked: ' + origin));
   },
   credentials: true,
@@ -137,7 +126,7 @@ app.use((err, _req, res, _next) => {
 });
 
 // ── START SERVER ─────────────────────────────────────────
-console.log('SERVER RESTORED — READY');
+console.log('SERVER RESTORED — CORS FIX APPLIED');
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`IQAC Portal running on port ${PORT}`);
 });
