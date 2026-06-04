@@ -36,7 +36,4 @@ function requireRole(...allowedRoles) {
   };
 }
 
-module.exports = {
-  authMiddleware,
-  requireRole
-};
+module.exports = {  authMiddleware,  requireRole};
