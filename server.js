@@ -11,7 +11,13 @@ const PORT = process.env.PORT || 8080;
 
 // ── CORS & PREFLIGHT HANDLING ───────────────────────────
 app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', 'https://github.io');
+  const origin = req.headers.origin;
+  
+  // Dynamically allow your specific GitHub Pages domain and local environments
+  if (origin && (origin.startsWith('https://zahiratec-ctrl.github.io') || origin.includes('localhost') || origin.includes('127.0.0.1'))) {
+    res.header('Access-Control-Allow-Origin', origin);
+  }
+  
   res.header('Access-Control-Allow-Credentials', 'true');
   res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Content-Type,Authorization');
@@ -31,6 +37,8 @@ const envOrigins = (process.env.CLIENT_ORIGIN || '')
 const allowedOrigins = [
   ...envOrigins,
   'https://github.io',
+  'https://github.io/iqac-frontend'
+  'https://github.io/iqac-frontend/'
   'http://localhost:3000',
   'http://localhost:5000',
   'http://localhost:5500',
