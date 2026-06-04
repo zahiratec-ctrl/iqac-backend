@@ -9,12 +9,16 @@ const fs = require('fs');
 const app = express();
 const PORT = process.env.PORT || 8080;
 
-// ── CORS & PREFLIGHT HANDLING ───────────────────────────
+/// ── CORS & PREFLIGHT HANDLING ───────────────────────────
 app.use((req, res, next) => {
   const origin = req.headers.origin;
   
-  // Dynamically allow your specific GitHub Pages domain and local environments
-  if (origin && (origin.startsWith('https://zahiratec-ctrl.github.io') || origin.includes('localhost') || origin.includes('127.0.0.1'))) {
+  // Dynamically check and approve requests from your frontend domains
+  if (origin && (
+    origin.startsWith('https://github.io') || 
+    origin.includes('localhost') || 
+    origin.includes('127.0.0.1')
+  )) {
     res.header('Access-Control-Allow-Origin', origin);
   }
   
@@ -37,8 +41,8 @@ const envOrigins = (process.env.CLIENT_ORIGIN || '')
 const allowedOrigins = [
   ...envOrigins,
   'https://github.io',
-  'https://github.io/iqac-frontend'
-  'https://github.io/iqac-frontend/'
+  'https://github.io/iqac-frontend',
+  'https://github.io/iqac-frontend/',
   'http://localhost:3000',
   'http://localhost:5000',
   'http://localhost:5500',
@@ -48,10 +52,18 @@ const allowedOrigins = [
 const corsOptions = {
   origin: function(origin, callback) {
     if (!origin) return callback(null, true);
-
     if (allowedOrigins.includes(origin)) {
       return callback(null, true);
     }
+    return callback(new Error('CORS blocked: ' + origin));
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+};
+
+app.use(cors(corsOptions));
+app.options(/.*/, cors(corsOptions));
 
     return callback(new Error('CORS blocked: ' + origin));
   },
