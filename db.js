@@ -1,4 +1,4 @@
-cconst { Pool } = require('pg');
+const { Pool } = require('pg');
 
 console.log('*** NEW DB.JS LOADED ***');
 
