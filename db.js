@@ -1,24 +1,23 @@
-// backend/db.js
 const { Pool } = require('pg');
 
-// Hardcoded connection configurations to completely bypass URL string parsing bugs
 const pool = new Pool({
-  user: 'postgres.qurwgavfmjpmfiduzhly',
-  host: '://supabase.com',
-  database: 'postgres',
-  password: 'Syedafouqiya10',
-  port: 6543,
+  host: process.env.DB_HOST,
+  port: process.env.DB_PORT,
+  database: process.env.DB_NAME,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
   ssl: {
-    rejectUnauthorized: false // Required for secure Supabase cloud connections
+    rejectUnauthorized: false
   }
 });
 
-// Test the connection securely on startup
 pool.connect((err, client, release) => {
   if (err) {
-    return console.error('❌ Supabase Connection Failure:', err.message);
+    console.error('❌ PostgreSQL Connection Failure:', err.message);
+    return;
   }
-  console.log('✅ Connected to Supabase PostgreSQL database successfully via hardcoded pool configs!');
+
+  console.log('✅ PostgreSQL Connected Successfully');
   release();
 });
 
