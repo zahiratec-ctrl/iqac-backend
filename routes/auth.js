@@ -5,7 +5,58 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const pool = require('../db'); // Your database connection file
 const { authMiddleware } = require('../middleware/auth');
+// POST /api/auth/register
+router.post('/register', async (req, res) => {
+  try {
+    const { empid, email, role, department, password } = req.body;
 
+    if (!empid || !email || !role || !password) {
+      return res.status(400).json({
+        error: 'empid, email, role and password are required'
+      });
+    }
+
+    if (password.length < 8) {
+      return res.status(400).json({
+        error: 'Password must be at least 8 characters'
+      });
+    }
+
+    // Check existing user
+    const existing = await pool.query(
+      'SELECT id FROM users WHERE empid = $1 OR email = $2',
+      [empid, email]
+    );
+
+    if (existing.rows.length > 0) {
+      return res.status(409).json({
+        error: 'Employee ID or Email already registered'
+      });
+    }
+
+    // Hash password
+    const hash = await bcrypt.hash(password, 12);
+
+    // Insert user
+    await pool.query(
+      `INSERT INTO users
+      (empid, email, role, department, password_hash)
+      VALUES ($1,$2,$3,$4,$5)`,
+      [empid, email, role, department || '-', hash]
+    );
+
+    res.status(201).json({
+      message: 'Account created successfully'
+    });
+
+  } catch (err) {
+    console.error('Registration Error:', err);
+
+    res.status(500).json({
+      error: 'Server error during registration'
+    });
+  }
+});
 // POST /api/auth/login
 router.post('/login', async (req, res) => {
   const { empid, password } = req.body;

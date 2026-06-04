@@ -9,39 +9,16 @@ const fs = require('fs');
 const app = express();
 const PORT = process.env.PORT || 8080;
 
-// ── CORS & PREFLIGHT HANDLING ───────────────────────────
-app.use((req, res, next) => {
-  const origin = req.headers.origin;
-  
-  if (origin && (
-    origin.startsWith('https://github.io') || 
-    origin.includes('localhost') || 
-    origin.includes('127.0.0.1')
-  )) {
-    res.header('Access-Control-Allow-Origin', origin);
-  }
-  
-  res.header('Access-Control-Allow-Credentials', 'true');
-  res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type,Authorization');
-
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(204);
-  }
-
-  next();
-});
-
+// ── CORS CONFIGURATION (UPDATED FOR VERCEL) ─────────────────
+// Read allowed origins from environment variable (comma-separated)
 const envOrigins = (process.env.CLIENT_ORIGIN || '')
   .split(',')
-  .map(s => s.trim())
+  .map(s => s.trim().replace(/\/$/, ''))
   .filter(Boolean);
 
+// Define all allowed origins
 const allowedOrigins = [
-  ...envOrigins,
-  'https://github.io',
-  'https://github.io/iqac-frontend',
-  'https://github.io/iqac-frontend/',
+  ...envOrigins,                // <-- Your Vercel URL will go here
   'http://localhost:3000',
   'http://localhost:5000',
   'http://localhost:5500',
@@ -50,19 +27,25 @@ const allowedOrigins = [
 
 const corsOptions = {
   origin: function(origin, callback) {
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin)) {
-      return callback(null, true);
-    }
-    return callback(new Error('CORS blocked: ' + origin));
-  },
+  if (!origin) return callback(null, true);
+
+  const normalizedOrigin = origin.replace(/\/$/, '');
+
+  if (allowedOrigins.includes(normalizedOrigin)) {
+    return callback(null, true);
+  }
+
+  callback(new Error(`CORS blocked: ${origin}`));
+},
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 };
 
+// Apply CORS middleware globally
 app.use(cors(corsOptions));
-app.options(/.*/, cors(corsOptions));
+// Handle preflight requests explicitly
+app.options('*', cors(corsOptions));
 
 // ── BODY PARSERS ─────────────────────────────────────────
 app.use(express.json({ limit: '20mb' }));
