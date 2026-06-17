@@ -6,6 +6,7 @@ const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
 
+
 const app = express();
 const PORT = process.env.PORT || 8080;
 
@@ -61,6 +62,7 @@ if (!fs.existsSync(uploadDir)) {
 app.use('/uploads', express.static(uploadDir));
 
 // ── API ROUTES ───────────────────────────────────────────
+// ── API ROUTES ───────────────────────────────────────────
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/events', require('./routes/events'));
 app.use('/api/attended', require('./routes/attended'));
@@ -69,6 +71,7 @@ app.use('/api/users', require('./routes/users'));
 app.use('/api/dashboard', require('./routes/dashboard'));
 app.use('/api/accreditations', require('./routes/accreditations'));
 app.use('/api/intelligence', require('./routes/intelligence'));
+app.use('/api/formats', require('./routes/formats'));
 
 // ── HEALTH CHECKS ────────────────────────────────────────
 app.get('/', (_req, res) => {
