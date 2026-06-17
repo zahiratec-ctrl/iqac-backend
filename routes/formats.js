@@ -38,7 +38,7 @@ const upload = multer({
 
 function iqacOnly(req, res, next) {
   const role = String(req.user?.role || '').toLowerCase();
-  if (role !== 'iqac') {
+  if (!['iqac','iqac_coordinator','iqac coordinator'].includes(role)) {
     return res.status(403).json({ error: 'Only IQAC Coordinator can perform this action' });
   }
   next();
