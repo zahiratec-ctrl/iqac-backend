@@ -58,15 +58,18 @@ router.post('/register', async (req, res) => {
   }
 });
 // POST /api/auth/login
+// POST /api/auth/login
 router.post('/login', async (req, res) => {
   const { empid, password, role } = req.body;
 
   try {
+    if (!empid || !password || !role) {
+      return res.status(400).json({ error: 'Employee ID, role and password are required' });
+    }
+
     const result = await pool.query(
-      role
-        ? 'SELECT * FROM users WHERE empid = $1 AND role = $2'
-        : 'SELECT * FROM users WHERE empid = $1',
-      role ? [empid, role] : [empid]
+      'SELECT * FROM users WHERE empid = $1 AND role = $2',
+      [empid, role]
     );
 
     if (result.rows.length === 0) {
@@ -76,6 +79,7 @@ router.post('/login', async (req, res) => {
     const user = result.rows[0];
 
     const isMatch = await bcrypt.compare(password, user.password_hash);
+
     if (!isMatch) {
       return res.status(401).json({ error: 'Invalid Employee ID, role or password' });
     }
