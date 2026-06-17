@@ -120,5 +120,25 @@ router.get('/me', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+// POST /api/auth/forgot-password
+router.post('/forgot-password', async (req, res) => {
+  try {
+    const { empid, email } = req.body;
 
+    const result = await pool.query(
+      'SELECT empid, email FROM users WHERE empid = $1 AND email = $2',
+      [empid, email]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Employee ID and email not found' });
+    }
+
+    res.json({ message: 'Identity verified' });
+
+  } catch (err) {
+    console.error('Forgot password error:', err);
+    res.status(500).json({ error: 'Server error during verification' });
+  }
+});
 module.exports = router; // <--- The crucial export statement Express needs!
