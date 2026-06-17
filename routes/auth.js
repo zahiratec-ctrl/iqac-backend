@@ -22,15 +22,15 @@ router.post('/register', async (req, res) => {
       });
     }
 
-    // Check existing user
+    // Allow same empid+email with a DIFFERENT role (dual responsibilities)
     const existing = await pool.query(
-      'SELECT id FROM users WHERE empid = $1 OR email = $2',
-      [empid, email]
+      'SELECT id FROM users WHERE empid = $1 AND email = $2 AND role = $3',
+      [empid, email, role]
     );
 
     if (existing.rows.length > 0) {
       return res.status(409).json({
-        error: 'Employee ID or Email already registered'
+        error: 'This Employee ID is already registered with the same role. Choose a different role to add another account.'
       });
     }
 
@@ -74,7 +74,7 @@ router.post('/login', async (req, res) => {
     }
 
     const token = jwt.sign(
-      { id: user.id, empid: user.empid, role: user.role, department: user.department },
+      { id: user.id, empid: user.empid, role: user.role },
       process.env.JWT_SECRET,
       { expiresIn: '24h' }
     );
