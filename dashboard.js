@@ -6,7 +6,6 @@ const { authMiddleware } = require('../middleware/auth');
 const router = express.Router();
 router.use(authMiddleware);
 
-// Helper: convert MySQL ? placeholders to PostgreSQL $1,$2,...
 function pg(sql, params = []) {
   let i = 0;
   const pgSql = sql.replace(/\?/g, () => `$${++i}`);
@@ -16,112 +15,89 @@ function pg(sql, params = []) {
 router.get('/', async (req, res) => {
   try {
     const { role, department, empid } = req.user;
+    console.log('Dashboard hit — user:', { role, department, empid });
 
-    const full   = ['iqac', 'principal'].includes(role);
-    const dept   = (!full && department && department !== '—') ? department : null;
-    const isFac  = role === 'faculty';
-
-    const deptFilter = dept ? 'AND department = ?' : '';
-    const deptParam  = dept ? [dept] : [];
+    const full  = ['iqac', 'principal'].includes(role);
+    const dept  = (!full && department && department !== '—') ? department : null;
+    const isFac = role === 'faculty';
 
     // ── FACULTY DASHBOARD ────────────────────────────────
     if (isFac) {
       const evRes  = await pg(
         `SELECT COUNT(*) AS cnt,
                 SUM(CASE WHEN status='Approved' THEN 1 ELSE 0 END) AS approved
-         FROM events WHERE submitted_by = ?`,
-        [empid]
-      );
-      const evRows = evRes.rows[0];
+         FROM events WHERE submitted_by = $1`, [empid]);
 
-      const attRes  = await pg(
-        `SELECT COUNT(*) AS cnt FROM events_attended WHERE submitted_by = ?`,
-        [empid]
-      );
-      const attRows = attRes.rows[0];
+      const attRes = await pg(
+        `SELECT COUNT(*) AS cnt FROM events_attended WHERE submitted_by = $1`, [empid]);
 
       const myEventsRes = await pg(
         `SELECT id, name, department, type, event_date, status,
-                hod_remarks, iqac_remarks, principal_remarks,
-                final_remarks, rejected_by
-         FROM events WHERE submitted_by = ? ORDER BY created_at DESC`,
-        [empid]
-      );
+                hod_remarks, iqac_remarks, principal_remarks, final_remarks, rejected_by
+         FROM events WHERE submitted_by = $1 ORDER BY created_at DESC`, [empid]);
 
       const myAttRes = await pg(
         `SELECT id, event_name, event_type, event_date, academic_year
-         FROM events_attended WHERE submitted_by = ? ORDER BY created_at DESC`,
-        [empid]
-      );
+         FROM events_attended WHERE submitted_by = $1 ORDER BY created_at DESC`, [empid]);
 
       return res.json({
         role: 'faculty',
         stats: {
-          events:   parseInt(evRows.cnt)      || 0,
-          attended: parseInt(attRows.cnt)     || 0,
-          approved: parseInt(evRows.approved) || 0
+          events:   parseInt(evRes.rows[0].cnt)      || 0,
+          attended: parseInt(attRes.rows[0].cnt)     || 0,
+          approved: parseInt(evRes.rows[0].approved) || 0
         },
         myEvents:   myEventsRes.rows,
         myAttended: myAttRes.rows
       });
     }
 
-    // ── IQAC DEPT / HOD / IQAC / PRINCIPAL DASHBOARD ────
-    const eventFilter = role === 'iqac_dept'
-      ? `WHERE status='Approved' ${dept ? 'AND department=?' : ''}`
-      : `WHERE 1=1 ${deptFilter}`;
+    // ── ALL OTHER ROLES ──────────────────────────────────
+    // Build WHERE clause safely without 1=1
+    const buildWhere = (base, extraDept) => {
+      if (base && extraDept) return `WHERE ${base} AND department = $1`;
+      if (base)              return `WHERE ${base}`;
+      if (extraDept)         return `WHERE department = $1`;
+      return '';
+    };
 
-    const eventParams = [...deptParam];
+    const isIqacDept = role === 'iqac_dept';
+    const baseCondition = isIqacDept ? "status = 'Approved'" : '';
+    const evWhere  = buildWhere(baseCondition, dept);
+    const facWhere = dept ? 'WHERE department = $1' : '';
+    const params   = dept ? [dept] : [];
 
-    const evStatsRes = await pg(
+    console.log('Dashboard query params:', { evWhere, facWhere, params, dept });
+
+    const evStatsRes = await db.query(
       `SELECT COUNT(*) AS total,
-              SUM(CASE WHEN status='Approved'           THEN 1 ELSE 0 END) AS approved,
-              SUM(CASE WHEN status LIKE 'Pending%'      THEN 1 ELSE 0 END) AS pending
-       FROM events ${eventFilter}`,
-      eventParams
-    );
-    const evStats = evStatsRes.rows[0];
+              SUM(CASE WHEN status='Approved'      THEN 1 ELSE 0 END) AS approved,
+              SUM(CASE WHEN status LIKE 'Pending%' THEN 1 ELSE 0 END) AS pending
+       FROM events ${evWhere}`, params);
 
-    const facStatsRes = await pg(
-      `SELECT COUNT(*) AS total FROM faculty WHERE 1=1 ${deptFilter}`,
-      deptParam
-    );
-    const facStats = facStatsRes.rows[0];
+    const facStatsRes = await db.query(
+      `SELECT COUNT(*) AS total FROM faculty ${facWhere}`, params);
 
-    const attStatsRes = await pg(
-      `SELECT COUNT(*) AS total FROM events_attended WHERE 1=1 ${deptFilter}`,
-      deptParam
-    );
-    const attStats = attStatsRes.rows[0];
+    const attStatsRes = await db.query(
+      `SELECT COUNT(*) AS total FROM events_attended ${facWhere}`, params);
 
-    const DEPTS       = ['CSE','ISE','ECE','AIML','ME','Humanities','Physics','Chemistry','Maths','IQAC'];
-    const targetDepts = dept ? [dept] : DEPTS;
+    const evByDeptRes = await db.query(
+      `SELECT department, COUNT(*) AS cnt FROM events ${evWhere} GROUP BY department`, params);
 
-    const evByDeptRes = await pg(
-      `SELECT department, COUNT(*) AS cnt FROM events WHERE 1=1 ${deptFilter} GROUP BY department`,
-      deptParam
-    );
-    const facByDeptRes = await pg(
-      `SELECT department, COUNT(*) AS cnt FROM faculty WHERE 1=1 ${deptFilter} GROUP BY department`,
-      deptParam
-    );
-    const attByDeptRes = await pg(
-      `SELECT department, COUNT(*) AS cnt FROM events_attended WHERE 1=1 ${deptFilter} GROUP BY department`,
-      deptParam
-    );
-    const evByTypeRes = await pg(
-      `SELECT type, COUNT(*) AS cnt FROM events WHERE 1=1 ${deptFilter} GROUP BY type`,
-      deptParam
-    );
-    const evByStatusRes = await pg(
-      `SELECT status, COUNT(*) AS cnt FROM events GROUP BY status`
-    );
-    const evDeptTypeRes = await pg(
-      `SELECT department, type, COUNT(*) AS cnt
-       FROM events WHERE 1=1 ${deptFilter}
-       GROUP BY department, type`,
-      deptParam
-    );
+    const facByDeptRes = await db.query(
+      `SELECT department, COUNT(*) AS cnt FROM faculty ${facWhere} GROUP BY department`, params);
+
+    const attByDeptRes = await db.query(
+      `SELECT department, COUNT(*) AS cnt FROM events_attended ${facWhere} GROUP BY department`, params);
+
+    const evByTypeRes = await db.query(
+      `SELECT type, COUNT(*) AS cnt FROM events ${evWhere} GROUP BY type`, params);
+
+    const evByStatusRes = await db.query(
+      `SELECT status, COUNT(*) AS cnt FROM events GROUP BY status`);
+
+    const evDeptTypeRes = await db.query(
+      `SELECT department, type, COUNT(*) AS cnt FROM events ${evWhere} GROUP BY department, type`, params);
 
     const evByDeptType = {};
     evDeptTypeRes.rows.forEach(r => {
@@ -132,16 +108,18 @@ router.get('/', async (req, res) => {
     const toMap = rows =>
       Object.fromEntries(rows.map(r => [r.department || r.type || r.status, r.cnt]));
 
+    const DEPTS = ['CSE','ISE','ECE','AIML','ME','Humanities','Physics','Chemistry','Maths','IQAC'];
+
     res.json({
       role,
       stats: {
-        events:   parseInt(evStats.total)    || 0,
-        approved: parseInt(evStats.approved) || 0,
-        pending:  parseInt(evStats.pending)  || 0,
-        faculty:  parseInt(facStats.total)   || 0,
-        attended: parseInt(attStats.total)   || 0
+        events:   parseInt(evStatsRes.rows[0].total)    || 0,
+        approved: parseInt(evStatsRes.rows[0].approved) || 0,
+        pending:  parseInt(evStatsRes.rows[0].pending)  || 0,
+        faculty:  parseInt(facStatsRes.rows[0].total)   || 0,
+        attended: parseInt(attStatsRes.rows[0].total)   || 0
       },
-      depts:      targetDepts,
+      depts:      dept ? [dept] : DEPTS,
       evByDept:   toMap(evByDeptRes.rows),
       facByDept:  toMap(facByDeptRes.rows),
       attByDept:  toMap(attByDeptRes.rows),
@@ -151,7 +129,7 @@ router.get('/', async (req, res) => {
     });
 
   } catch (err) {
-    console.error('Dashboard error:', err);
+    console.error('Dashboard error:', err.message, err.stack);
     res.status(500).json({ error: 'Failed to load dashboard', detail: err.message });
   }
 });
