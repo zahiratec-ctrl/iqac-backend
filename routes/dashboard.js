@@ -6,12 +6,6 @@ const { authMiddleware } = require('../middleware/auth');
 const router = express.Router();
 router.use(authMiddleware);
 
-function pg(sql, params = []) {
-  let i = 0;
-  const pgSql = sql.replace(/\?/g, () => `$${++i}`);
-  return db.query(pgSql, params);
-}
-
 router.get('/', async (req, res) => {
   try {
     const { role, department, empid } = req.user;
@@ -23,20 +17,20 @@ router.get('/', async (req, res) => {
 
     // ── FACULTY DASHBOARD ────────────────────────────────
     if (isFac) {
-      const evRes  = await pg(
+      const evRes  = await db.query(
         `SELECT COUNT(*) AS cnt,
-                SUM(CASE WHEN status='Approved' THEN 1 ELSE 0 END) AS approved
+                SUM(CASE WHEN status::text = 'Approved' THEN 1 ELSE 0 END) AS approved
          FROM events WHERE submitted_by = $1`, [empid]);
 
-      const attRes = await pg(
+      const attRes = await db.query(
         `SELECT COUNT(*) AS cnt FROM events_attended WHERE submitted_by = $1`, [empid]);
 
-      const myEventsRes = await pg(
+      const myEventsRes = await db.query(
         `SELECT id, name, department, type, event_date, status,
                 hod_remarks, iqac_remarks, principal_remarks, final_remarks, rejected_by
          FROM events WHERE submitted_by = $1 ORDER BY created_at DESC`, [empid]);
 
-      const myAttRes = await pg(
+      const myAttRes = await db.query(
         `SELECT id, event_name, event_type, event_date, academic_year
          FROM events_attended WHERE submitted_by = $1 ORDER BY created_at DESC`, [empid]);
 
@@ -53,26 +47,27 @@ router.get('/', async (req, res) => {
     }
 
     // ── ALL OTHER ROLES ──────────────────────────────────
-    // Build WHERE clause safely without 1=1
-    const buildWhere = (base, extraDept) => {
-      if (base && extraDept) return `WHERE ${base} AND department = $1`;
-      if (base)              return `WHERE ${base}`;
-      if (extraDept)         return `WHERE department = $1`;
-      return '';
+    const isIqacDept = role === 'iqac_dept';
+
+    // Build params and WHERE clauses
+    const params   = dept ? [dept] : [];
+    const deptCond = dept ? `department = $1` : null;
+    const appCond  = isIqacDept ? `status::text = 'Approved'` : null;
+
+    const buildWhere = (...conds) => {
+      const active = conds.filter(Boolean);
+      return active.length ? 'WHERE ' + active.join(' AND ') : '';
     };
 
-    const isIqacDept = role === 'iqac_dept';
-    const baseCondition = isIqacDept ? "status = 'Approved'" : '';
-    const evWhere  = buildWhere(baseCondition, dept);
-    const facWhere = dept ? 'WHERE department = $1' : '';
-    const params   = dept ? [dept] : [];
+    const evWhere  = buildWhere(appCond, deptCond);
+    const facWhere = buildWhere(deptCond);
 
-    console.log('Dashboard query params:', { evWhere, facWhere, params, dept });
+    console.log('Dashboard WHERE:', { evWhere, facWhere, params });
 
     const evStatsRes = await db.query(
       `SELECT COUNT(*) AS total,
-              SUM(CASE WHEN status='Approved'      THEN 1 ELSE 0 END) AS approved,
-              SUM(CASE WHEN status LIKE 'Pending%' THEN 1 ELSE 0 END) AS pending
+              SUM(CASE WHEN status::text = 'Approved'        THEN 1 ELSE 0 END) AS approved,
+              SUM(CASE WHEN status::text LIKE 'Pending%'     THEN 1 ELSE 0 END) AS pending
        FROM events ${evWhere}`, params);
 
     const facStatsRes = await db.query(
@@ -94,7 +89,7 @@ router.get('/', async (req, res) => {
       `SELECT type, COUNT(*) AS cnt FROM events ${evWhere} GROUP BY type`, params);
 
     const evByStatusRes = await db.query(
-      `SELECT status, COUNT(*) AS cnt FROM events GROUP BY status`);
+      `SELECT status::text AS status, COUNT(*) AS cnt FROM events GROUP BY status::text`);
 
     const evDeptTypeRes = await db.query(
       `SELECT department, type, COUNT(*) AS cnt FROM events ${evWhere} GROUP BY department, type`, params);
