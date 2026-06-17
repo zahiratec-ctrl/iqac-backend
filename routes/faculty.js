@@ -39,10 +39,14 @@ router.get('/', async (req, res) => {
     let where  = '';
     let params = [];
 
-    if (['hod','iqac_dept'].includes(role) && department && department !== '—') {
-      where  = 'WHERE department = ?';
-      params = [department];
-    }
+    if (role === 'faculty') {
+  where  = 'WHERE empid = ?';
+  params = [req.user.empid];
+}
+else if (['hod','iqac_dept'].includes(role) && department && department !== '—') {
+  where  = 'WHERE department = ?';
+  params = [department];
+}
 
     const result = await pg(`SELECT * FROM faculty ${where} ORDER BY name ASC`, params);
     res.json(result.rows);
