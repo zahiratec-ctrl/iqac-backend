@@ -277,4 +277,180 @@ router.get('/my-contribution', async (req, res) => {
   }
 });
 
+
+// ══ QUANTITATIVE INTELLIGENCE REPORT WORKFLOW ══
+
+// GET /api/intelligence/faculty-contribution
+router.get('/faculty-contribution', async (req, res) => {
+  try {
+    let role = String(req.user?.role || '').trim().toLowerCase();
+    let department = String(req.user?.department || '').trim();
+
+    if (!['hod','iqac_dept'].includes(role)) {
+      return res.status(403).json({ error: 'Only HOD / IQAC department coordinator can view faculty contribution matrix.' });
+    }
+
+    if (!department || department === '—') {
+      return res.status(400).json({ error: 'Department not found in login token.' });
+    }
+
+    const facRes = await pg(`
+      SELECT empid, name, email, department, designation, qualification, teaching_exp,
+             doc_appt, doc_pan, doc_aadhar, doc_resume
+      FROM faculty
+      WHERE department = ?
+      ORDER BY name ASC, empid ASC
+    `, [department]);
+
+    const rows = [];
+
+    for (const f of facRes.rows) {
+      const empid = f.empid;
+
+      const evRes = await pg(`
+        SELECT type, COUNT(*) AS cnt
+        FROM events
+        WHERE submitted_by = ?
+        GROUP BY type
+      `, [empid]);
+
+      const attRes = await pg(`
+        SELECT event_type, COUNT(*) AS cnt
+        FROM events_attended
+        WHERE submitted_by = ?
+        GROUP BY event_type
+      `, [empid]);
+
+      let organized_count = 0;
+      let attended_count = 0;
+      const nbaSet = new Set();
+      const naacSet = new Set();
+
+      evRes.rows.forEach(e => {
+        organized_count += safeNum(e.cnt);
+        getNbaMappingByEventType(e.type).forEach(x => nbaSet.add(x));
+        getNaacMappingByEventType(e.type).forEach(x => naacSet.add(x));
+      });
+
+      attRes.rows.forEach(a => {
+        attended_count += safeNum(a.cnt);
+        getNbaMappingByEventType(a.event_type).forEach(x => nbaSet.add(x));
+        getNaacMappingByEventType(a.event_type).forEach(x => naacSet.add(x));
+      });
+
+      let missing_docs = 0;
+      ['doc_appt','doc_pan','doc_aadhar','doc_resume'].forEach(k => {
+        if (!f[k] || f[k] === '—' || f[k] === '') missing_docs++;
+      });
+
+      let score = 0;
+      if (organized_count > 0) score += 30;
+      if (attended_count > 0) score += 30;
+      if (String(f.qualification || '').toLowerCase().includes('ph')) score += 15;
+      if (missing_docs === 0) score += 15;
+      if (nbaSet.size >= 2 && naacSet.size >= 2) score += 10;
+
+      rows.push({
+        empid: f.empid,
+        name: f.name,
+        email: f.email,
+        department: f.department,
+        designation: f.designation,
+        qualification: f.qualification,
+        organized_count,
+        attended_count,
+        missing_docs,
+        nba: Array.from(nbaSet),
+        naac: Array.from(naacSet),
+        contribution_score: score
+      });
+    }
+
+    res.json(rows);
+  } catch (err) {
+    console.error('Faculty contribution intelligence error:', err);
+    res.status(500).json({ error: 'Failed to generate faculty contribution matrix', details: err.message });
+  }
+});
+
+// POST /api/intelligence/reports
+router.post('/reports', async (req, res) => {
+  try {
+    let role = String(req.user?.role || '').trim().toLowerCase();
+
+    if (!['iqac','principal','hod','iqac_dept'].includes(role)) {
+      return res.status(403).json({ error: 'Only IQAC, Principal and HOD roles can save reports.' });
+    }
+
+    const {
+      report_type,
+      scope,
+      department,
+      remarks,
+      summary_json,
+      visible_to
+    } = req.body || {};
+
+    if (!remarks) {
+      return res.status(400).json({ error: 'Remarks are required.' });
+    }
+
+    const result = await db.query(`
+      INSERT INTO intelligence_reports
+        (report_type, scope, department, generated_by, remarks, summary_json, visible_to)
+      VALUES ($1,$2,$3,$4,$5,$6,$7)
+      RETURNING *
+    `, [
+      report_type || 'Intelligence Report',
+      scope || 'institution',
+      department || req.user.department || null,
+      req.user.empid || req.user.email || role,
+      remarks,
+      summary_json || {},
+      visible_to || (['hod','iqac_dept'].includes(role) ? 'faculty' : 'hod')
+    ]);
+
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    console.error('Save intelligence report error:', err);
+    res.status(500).json({ error: 'Failed to save intelligence report', details: err.message });
+  }
+});
+
+// GET /api/intelligence/reports
+router.get('/reports', async (req, res) => {
+  try {
+    let role = String(req.user?.role || '').trim().toLowerCase();
+    let department = String(req.user?.department || '').trim();
+
+    const visible_to = String(req.query.visible_to || '').trim();
+    const qDept = String(req.query.department || '').trim();
+
+    let sql = `SELECT id, report_type, scope, department, generated_by, remarks, visible_to, created_at
+               FROM intelligence_reports WHERE 1=1`;
+    const params = [];
+
+    if (visible_to) {
+      params.push(visible_to);
+      sql += ` AND visible_to = $${params.length}`;
+    }
+
+    if (['hod','iqac_dept','faculty'].includes(role)) {
+      const dept = qDept || department;
+      if (dept && dept !== '—') {
+        params.push(dept);
+        sql += ` AND (department = $${params.length} OR department IS NULL OR department = '')`;
+      }
+    }
+
+    sql += ` ORDER BY created_at DESC LIMIT 20`;
+
+    const result = await db.query(sql, params);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Fetch intelligence reports error:', err);
+    res.status(500).json({ error: 'Failed to fetch intelligence reports', details: err.message });
+  }
+});
+
 module.exports = router;
