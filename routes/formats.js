@@ -20,21 +20,7 @@ const storage = multer.diskStorage({
   }
 });
 
-const upload = multer({
-  storage,
-  limits: { fileSize: 25 * 1024 * 1024 }, // 25 MB
-  fileFilter: (_req, file, cb) => {
-    const allowed = [
-      '.pdf', '.doc', '.docx', '.xls', '.xlsx',
-      '.ppt', '.pptx', '.zip'
-    ];
-    const ext = path.extname(file.originalname).toLowerCase();
-    if (!allowed.includes(ext)) {
-      return cb(new Error('Only PDF, Word, Excel, PPT and ZIP files are allowed'));
-    }
-    cb(null, true);
-  }
-});
+const upload = multer({ storage, limits: { fileSize: 25 * 1024 * 1024 } });
 
 function iqacOnly(req, res, next) {
   const role = String(req.user?.role || '').toLowerCase();
@@ -44,32 +30,72 @@ function iqacOnly(req, res, next) {
   next();
 }
 
-// Optional auth for direct download links with ?token=
 function downloadAuth(req, res, next) {
   const header = req.headers.authorization || '';
   const bearer = header.startsWith('Bearer ') ? header.slice(7) : '';
   const token = bearer || req.query.token;
-
   if (!token) return res.status(401).json({ error: 'No token provided' });
-
-  try {
-    req.user = jwt.verify(token, process.env.JWT_SECRET);
-    next();
-  } catch (_err) {
-    return res.status(401).json({ error: 'Invalid or expired token' });
-  }
+  try { req.user = jwt.verify(token, process.env.JWT_SECRET); next(); }
+  catch { return res.status(401).json({ error: 'Invalid or expired token' }); }
 }
 
-// GET /api/formats
+router.get('/categories', authMiddleware, async (_req, res) => {
+  try {
+    const result = await pool.query('SELECT category FROM iqac_format_categories ORDER BY category ASC');
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Format categories fetch error:', err);
+    res.status(500).json({ error: 'Unable to fetch format categories' });
+  }
+});
+
+router.post('/categories', authMiddleware, iqacOnly, async (req, res) => {
+  try {
+    const category = String(req.body.category || '').trim();
+    if (!category) return res.status(400).json({ error: 'Category is required' });
+    const result = await pool.query(
+      'INSERT INTO iqac_format_categories (category, created_by) VALUES ($1,$2) ON CONFLICT (category) DO UPDATE SET category = EXCLUDED.category RETURNING *',
+      [category, req.user.empid || req.user.email || 'iqac']
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    console.error('Format category add error:', err);
+    res.status(500).json({ error: 'Unable to add category' });
+  }
+});
+
+router.delete('/categories/:category', authMiddleware, iqacOnly, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const category = decodeURIComponent(req.params.category || '').trim();
+    if (!category) return res.status(400).json({ error: 'Category is required' });
+
+    await client.query('BEGIN');
+    const files = await client.query('SELECT file_path FROM iqac_formats WHERE category = $1', [category]);
+    await client.query('DELETE FROM iqac_formats WHERE category = $1', [category]);
+    await client.query('DELETE FROM iqac_format_categories WHERE category = $1', [category]);
+    await client.query('COMMIT');
+
+    for (const f of files.rows) {
+      if (f.file_path && fs.existsSync(f.file_path)) {
+        try { fs.unlinkSync(f.file_path); } catch {}
+      }
+    }
+    res.json({ message: 'Category and related formats deleted successfully' });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Format category delete error:', err);
+    res.status(500).json({ error: 'Unable to delete category' });
+  } finally {
+    client.release();
+  }
+});
+
 router.get('/', authMiddleware, async (_req, res) => {
   try {
-    const result = await pool.query(`
-      SELECT id, category, title, original_name, filename, mime_type,
-             uploaded_by, created_at
-      FROM iqac_formats
-      ORDER BY category ASC, created_at DESC
-    `);
-
+    const result = await pool.query(
+      'SELECT id, category, title, original_name, filename, file_path, mime_type, uploaded_by, created_at FROM iqac_formats ORDER BY category ASC, created_at DESC'
+    );
     res.json(result.rows);
   } catch (err) {
     console.error('Formats fetch error:', err);
@@ -77,35 +103,26 @@ router.get('/', authMiddleware, async (_req, res) => {
   }
 });
 
-// POST /api/formats
 router.post('/', authMiddleware, iqacOnly, upload.single('formatFile'), async (req, res) => {
   try {
     const { category, title } = req.body;
-
     if (!category || !title) {
       if (req.file) fs.unlinkSync(req.file.path);
       return res.status(400).json({ error: 'Category and title are required' });
     }
+    if (!req.file) return res.status(400).json({ error: 'Format file is required' });
 
-    if (!req.file) {
-      return res.status(400).json({ error: 'Format file is required' });
-    }
+    await pool.query(
+      'INSERT INTO iqac_format_categories (category, created_by) VALUES ($1,$2) ON CONFLICT (category) DO NOTHING',
+      [category.trim(), req.user.empid || req.user.email || 'iqac']
+    );
 
-    const result = await pool.query(`
-      INSERT INTO iqac_formats
-        (category, title, original_name, filename, file_path, mime_type, uploaded_by)
-      VALUES ($1,$2,$3,$4,$5,$6,$7)
-      RETURNING id, category, title, original_name, filename, mime_type, uploaded_by, created_at
-    `, [
-      category.trim(),
-      title.trim(),
-      req.file.originalname,
-      req.file.filename,
-      req.file.path,
-      req.file.mimetype,
-      req.user.empid || req.user.email || 'iqac'
-    ]);
-
+    const result = await pool.query(
+      `INSERT INTO iqac_formats (category, title, original_name, filename, file_path, mime_type, uploaded_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)
+       RETURNING id, category, title, original_name, filename, file_path, mime_type, uploaded_by, created_at`,
+      [category.trim(), title.trim(), req.file.originalname, req.file.filename, req.file.path, req.file.mimetype, req.user.empid || req.user.email || 'iqac']
+    );
     res.status(201).json(result.rows[0]);
   } catch (err) {
     console.error('Format upload error:', err);
@@ -113,50 +130,26 @@ router.post('/', authMiddleware, iqacOnly, upload.single('formatFile'), async (r
   }
 });
 
-// GET /api/formats/:id/download
 router.get('/:id/download', downloadAuth, async (req, res) => {
   try {
-    const result = await pool.query(
-      'SELECT * FROM iqac_formats WHERE id = $1',
-      [req.params.id]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Format not found' });
-    }
-
+    const result = await pool.query('SELECT * FROM iqac_formats WHERE id = $1', [req.params.id]);
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Format not found' });
     const file = result.rows[0];
-
-    if (!fs.existsSync(file.file_path)) {
-      return res.status(404).json({ error: 'File missing on server' });
-    }
-
-    res.download(file.file_path, file.original_name);
+    if (!file.file_path || !fs.existsSync(file.file_path)) return res.status(404).json({ error: 'File missing on server' });
+    res.download(file.file_path, file.original_name || file.filename || 'format');
   } catch (err) {
     console.error('Format download error:', err);
     res.status(500).json({ error: 'Unable to download format' });
   }
 });
 
-// DELETE /api/formats/:id
 router.delete('/:id', authMiddleware, iqacOnly, async (req, res) => {
   try {
-    const found = await pool.query(
-      'SELECT file_path FROM iqac_formats WHERE id = $1',
-      [req.params.id]
-    );
-
-    if (found.rows.length === 0) {
-      return res.status(404).json({ error: 'Format not found' });
-    }
-
+    const found = await pool.query('SELECT file_path FROM iqac_formats WHERE id = $1', [req.params.id]);
+    if (found.rows.length === 0) return res.status(404).json({ error: 'Format not found' });
     await pool.query('DELETE FROM iqac_formats WHERE id = $1', [req.params.id]);
-
     const filePath = found.rows[0].file_path;
-    if (filePath && fs.existsSync(filePath)) {
-      fs.unlinkSync(filePath);
-    }
-
+    if (filePath && fs.existsSync(filePath)) { try { fs.unlinkSync(filePath); } catch {} }
     res.json({ message: 'Format deleted successfully' });
   } catch (err) {
     console.error('Format delete error:', err);
