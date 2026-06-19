@@ -32,9 +32,12 @@ const corsOptions = {
 
   const normalizedOrigin = origin.replace(/\/$/, '');
 
-  if (allowedOrigins.includes(normalizedOrigin)) {
-    return callback(null, true);
-  }
+  if (
+  allowedOrigins.includes(normalizedOrigin) ||
+  normalizedOrigin.endsWith('.vercel.app')
+) {
+  return callback(null, true);
+}
 
   callback(new Error(`CORS blocked: ${origin}`));
 },
