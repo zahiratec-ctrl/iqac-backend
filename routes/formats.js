@@ -1,25 +1,11 @@
 const express = require('express');
-const path = require('path');
-const fs = require('fs');
 const multer = require('multer');
-const jwt = require('jsonwebtoken');
 const pool = require('../db');
 const { authMiddleware } = require('../middleware/auth');
+const { uploadBuffer, downloadToResponse, deleteFile } = require('../utils/supabaseStorage');
 
 const router = express.Router();
-
-const uploadDir = path.join(__dirname, '..', 'uploads', 'formats');
-fs.mkdirSync(uploadDir, { recursive: true });
-
-const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, uploadDir),
-  filename: (_req, file, cb) => {
-    const safe = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
-    cb(null, `${Date.now()}-${safe}`);
-  }
-});
-
-const upload = multer({ storage });
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 
 function iqacOnly(req, res, next) {
   const role = String(req.user?.role || '').toLowerCase();
@@ -30,7 +16,6 @@ function iqacOnly(req, res, next) {
 }
 
 // GET /api/formats/categories
-// IMPORTANT: this route must be before /:id/download
 router.get('/categories', authMiddleware, async (_req, res) => {
   try {
     const result = await pool.query(`
@@ -46,15 +31,12 @@ router.get('/categories', authMiddleware, async (_req, res) => {
 });
 
 // DELETE /api/formats/categories/:category
-// Deletes dropdown category and all uploaded formats under it.
 router.delete('/categories/:category', authMiddleware, iqacOnly, async (req, res) => {
   const client = await pool.connect();
 
   try {
     const category = decodeURIComponent(req.params.category || '').trim();
-    if (!category) {
-      return res.status(400).json({ error: 'Category is required' });
-    }
+    if (!category) return res.status(400).json({ error: 'Category is required' });
 
     await client.query('BEGIN');
 
@@ -68,12 +50,7 @@ router.delete('/categories/:category', authMiddleware, iqacOnly, async (req, res
 
     await client.query('COMMIT');
 
-    // Remove physical files after DB commit
-    for (const f of files.rows) {
-      if (f.file_path && fs.existsSync(f.file_path)) {
-        try { fs.unlinkSync(f.file_path); } catch (_e) {}
-      }
-    }
+    for (const f of files.rows) await deleteFile(f.file_path);
 
     res.json({ message: 'Category and related formats deleted successfully' });
   } catch (err) {
@@ -106,23 +83,16 @@ router.post('/', authMiddleware, iqacOnly, upload.single('formatFile'), async (r
   try {
     const { category, title } = req.body;
 
-    if (!category || !title) {
-      return res.status(400).json({ error: 'Category and title are required' });
-    }
+    if (!category || !title) return res.status(400).json({ error: 'Category and title are required' });
+    if (!req.file) return res.status(400).json({ error: 'Format file is required' });
 
-    if (!req.file) {
-      return res.status(400).json({ error: 'Format file is required' });
-    }
+    const stored = await uploadBuffer('formats', req.file);
 
-    // Ensure new category becomes available in dropdown
     await pool.query(`
       INSERT INTO iqac_format_categories (category, created_by)
       VALUES ($1,$2)
       ON CONFLICT (category) DO NOTHING
-    `, [
-      category.trim(),
-      req.user.empid || req.user.email || 'iqac'
-    ]);
+    `, [category.trim(), req.user.empid || req.user.email || 'iqac']);
 
     const result = await pool.query(`
       INSERT INTO iqac_formats
@@ -132,10 +102,10 @@ router.post('/', authMiddleware, iqacOnly, upload.single('formatFile'), async (r
     `, [
       category.trim(),
       title.trim(),
-      req.file.originalname,
-      req.file.filename,
-      req.file.path,
-      req.file.mimetype,
+      stored.originalName,
+      stored.path,
+      stored.path,
+      stored.mimeType,
       req.user.empid || req.user.email || 'iqac'
     ]);
 
@@ -149,22 +119,12 @@ router.post('/', authMiddleware, iqacOnly, upload.single('formatFile'), async (r
 // GET /api/formats/:id/download
 router.get('/:id/download', authMiddleware, async (req, res) => {
   try {
-    const result = await pool.query(
-      'SELECT * FROM iqac_formats WHERE id = $1',
-      [req.params.id]
-    );
+    const result = await pool.query('SELECT * FROM iqac_formats WHERE id = $1', [req.params.id]);
 
-    if (!result.rows.length) {
-      return res.status(404).json({ error: 'File not found' });
-    }
+    if (!result.rows.length) return res.status(404).json({ error: 'File not found' });
 
     const file = result.rows[0];
-
-    if (!file.file_path || !fs.existsSync(file.file_path)) {
-      return res.status(404).json({ error: 'File missing on server' });
-    }
-
-    res.download(file.file_path, file.original_name || file.filename || 'format');
+    return downloadToResponse(file.file_path || file.filename, res, file.original_name || file.title || 'format');
   } catch (err) {
     console.error('Format download error:', err);
     res.status(500).json({ error: 'Unable to download format' });
@@ -174,21 +134,12 @@ router.get('/:id/download', authMiddleware, async (req, res) => {
 // DELETE /api/formats/:id
 router.delete('/:id', authMiddleware, iqacOnly, async (req, res) => {
   try {
-    const found = await pool.query(
-      'SELECT file_path FROM iqac_formats WHERE id = $1',
-      [req.params.id]
-    );
+    const found = await pool.query('SELECT file_path FROM iqac_formats WHERE id = $1', [req.params.id]);
 
-    if (!found.rows.length) {
-      return res.status(404).json({ error: 'Format not found' });
-    }
+    if (!found.rows.length) return res.status(404).json({ error: 'Format not found' });
 
     await pool.query('DELETE FROM iqac_formats WHERE id = $1', [req.params.id]);
-
-    const filePath = found.rows[0].file_path;
-    if (filePath && fs.existsSync(filePath)) {
-      try { fs.unlinkSync(filePath); } catch (_e) {}
-    }
+    await deleteFile(found.rows[0].file_path);
 
     res.json({ message: 'Format deleted successfully' });
   } catch (err) {
