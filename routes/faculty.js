@@ -1,12 +1,12 @@
-// backend/routes/faculty.js — PostgreSQL version
+// backend/routes/faculty.js — Supabase Storage version
 const express = require('express');
-const path    = require('path');
-const fs      = require('fs');
-const upload  = require('../middleware/upload');
-const db      = require('../db');
+const upload = require('../middleware/upload');
+const db = require('../db');
 const { authMiddleware, requireRole } = require('../middleware/auth');
+const { uploadBuffer, downloadToResponse, deleteFile } = require('../utils/supabaseStorage');
 
 const router = express.Router();
+
 router.use((req, res, next) => {
   console.log('FACULTY ROUTER:', req.method, req.originalUrl);
   next();
@@ -19,34 +19,38 @@ function pg(sql, params = []) {
 }
 
 const DOC_FIELDS = [
-  { name: 'doc_appt',     maxCount: 1  },
-  { name: 'doc_pan',      maxCount: 1  },
-  { name: 'doc_aadhar',   maxCount: 1  },
-  { name: 'doc_resume',   maxCount: 1  },
-  { name: 'doc_exp_certs',maxCount: 10 }
+  { name: 'doc_appt', maxCount: 1 },
+  { name: 'doc_pan', maxCount: 1 },
+  { name: 'doc_aadhar', maxCount: 1 },
+  { name: 'doc_resume', maxCount: 1 },
+  { name: 'doc_exp_certs', maxCount: 10 }
 ];
 
-// GET /api/faculty
+async function uploadDoc(files, fieldName, folder = 'faculty') {
+  if (!files?.[fieldName]?.[0]) return null;
+  const stored = await uploadBuffer(folder, files[fieldName][0]);
+  return stored.path;
+}
+
 router.get('/', async (req, res) => {
   console.log('FACULTY ROUTE HIT');
   console.log('USER =', req.user);
   try {
     if (!req.user) return res.status(401).json({ error: 'User not authenticated' });
 
-    const role       = String(req.user.role || '').toLowerCase();
+    const role = String(req.user.role || '').toLowerCase();
     const department = req.user.department || '';
 
-    let where  = '';
+    let where = '';
     let params = [];
 
     if (role === 'faculty') {
-  where  = 'WHERE empid = ?';
-  params = [req.user.empid];
-}
-else if (['hod','iqac_dept'].includes(role) && department && department !== '—') {
-  where  = 'WHERE department = ?';
-  params = [department];
-}
+      where = 'WHERE empid = ?';
+      params = [req.user.empid];
+    } else if (['hod','iqac_dept'].includes(role) && department && department !== '—') {
+      where = 'WHERE department = ?';
+      params = [department];
+    }
 
     const result = await pg(`SELECT * FROM faculty ${where} ORDER BY name ASC`, params);
     res.json(result.rows);
@@ -56,7 +60,6 @@ else if (['hod','iqac_dept'].includes(role) && department && department !== '—
   }
 });
 
-// GET /api/faculty/:id
 router.get('/:id', async (req, res) => {
   try {
     const result = await pg('SELECT * FROM faculty WHERE id = ?', [req.params.id]);
@@ -67,7 +70,6 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// POST /api/faculty
 router.post('/',
   requireRole('faculty','hod','iqac','iqac_dept','principal'),
   upload.fields(DOC_FIELDS),
@@ -84,12 +86,17 @@ router.post('/',
       if (exist.rows.length)
         return res.status(409).json({ error: 'A faculty with this Employee ID already exists' });
 
-      const files     = req.files || {};
-      const docAppt   = files.doc_appt?.[0]?.filename    || '—';
-      const docPan    = files.doc_pan?.[0]?.filename     || '—';
-      const docAadhar = files.doc_aadhar?.[0]?.filename  || '—';
-      const docResume = files.doc_resume?.[0]?.filename  || '—';
-      const expCerts  = (files.doc_exp_certs || []).map(f => f.filename);
+      const files = req.files || {};
+      const docAppt = await uploadDoc(files, 'doc_appt');
+      const docPan = await uploadDoc(files, 'doc_pan');
+      const docAadhar = await uploadDoc(files, 'doc_aadhar');
+      const docResume = await uploadDoc(files, 'doc_resume');
+
+      const expCerts = [];
+      for (const f of (files.doc_exp_certs || [])) {
+        const stored = await uploadBuffer('faculty', f);
+        expCerts.push(stored.path);
+      }
 
       const result = await pg(`
         INSERT INTO faculty
@@ -103,9 +110,10 @@ router.post('/',
          dob||null, doj||null, dor||null, emp_status||'serving',
          qualification||'', specialization||'', aadhar_no||'', pan_no||'',
          parseInt(teaching_exp)||0, parseInt(research_exp)||0, parseInt(industry_exp)||0,
-         docAppt, docPan, docAadhar, JSON.stringify(expCerts), docResume,
+         docAppt || '—', docPan || '—', docAadhar || '—', JSON.stringify(expCerts), docResume || '—',
          req.user.empid]
       );
+
       res.status(201).json({ id: result.rows[0].id, message: 'Faculty profile created' });
     } catch (err) {
       console.error(err);
@@ -114,7 +122,6 @@ router.post('/',
   }
 );
 
-// PUT /api/faculty/:id
 router.put('/:id',
   requireRole('faculty','hod','iqac','iqac_dept','principal'),
   upload.fields(DOC_FIELDS),
@@ -131,18 +138,27 @@ router.put('/:id',
       if (conflict.rows.length)
         return res.status(409).json({ error: 'Another faculty already has this Employee ID' });
 
-      const files     = req.files || {};
-      const docAppt   = files.doc_appt?.[0]?.filename;
-      const docPan    = files.doc_pan?.[0]?.filename;
-      const docAadhar = files.doc_aadhar?.[0]?.filename;
-      const docResume = files.doc_resume?.[0]?.filename;
+      const oldRes = await pg('SELECT * FROM faculty WHERE id = ?', [req.params.id]);
+      if (!oldRes.rows.length) return res.status(404).json({ error: 'Faculty not found' });
+      const old = oldRes.rows[0];
 
-      let docSql    = '';
+      const files = req.files || {};
+      const docAppt = await uploadDoc(files, 'doc_appt');
+      const docPan = await uploadDoc(files, 'doc_pan');
+      const docAadhar = await uploadDoc(files, 'doc_aadhar');
+      const docResume = await uploadDoc(files, 'doc_resume');
+
+      if (docAppt) await deleteFile(old.doc_appt);
+      if (docPan) await deleteFile(old.doc_pan);
+      if (docAadhar) await deleteFile(old.doc_aadhar);
+      if (docResume) await deleteFile(old.doc_resume);
+
+      let docSql = '';
       const docParams = [];
-      if (docAppt)   { docSql += ', doc_appt=?';   docParams.push(docAppt); }
-      if (docPan)    { docSql += ', doc_pan=?';     docParams.push(docPan); }
-      if (docAadhar) { docSql += ', doc_aadhar=?';  docParams.push(docAadhar); }
-      if (docResume) { docSql += ', doc_resume=?';  docParams.push(docResume); }
+      if (docAppt) { docSql += ', doc_appt=?'; docParams.push(docAppt); }
+      if (docPan) { docSql += ', doc_pan=?'; docParams.push(docPan); }
+      if (docAadhar) { docSql += ', doc_aadhar=?'; docParams.push(docAadhar); }
+      if (docResume) { docSql += ', doc_resume=?'; docParams.push(docResume); }
 
       await pg(`
         UPDATE faculty SET
@@ -158,6 +174,7 @@ router.put('/:id',
          parseInt(teaching_exp)||0, parseInt(research_exp)||0, parseInt(industry_exp)||0,
          ...docParams, req.params.id]
       );
+
       res.json({ message: 'Faculty profile updated' });
     } catch (err) {
       console.error(err);
@@ -166,7 +183,6 @@ router.put('/:id',
   }
 );
 
-// DELETE /api/faculty/:id
 router.delete('/:id',
   requireRole('faculty','hod','iqac','iqac_dept','principal'),
   async (req, res) => {
@@ -174,8 +190,8 @@ router.delete('/:id',
       const result = await pg('SELECT * FROM faculty WHERE id = ?', [req.params.id]);
       if (!result.rows.length) return res.status(404).json({ error: 'Faculty not found' });
 
-      const fac          = result.rows[0];
-      const loggedEmpid  = String(req.user.empid || req.user.employee_id || req.user.id || '').trim();
+      const fac = result.rows[0];
+      const loggedEmpid = String(req.user.empid || req.user.employee_id || req.user.id || '').trim();
 
       if (req.user.role === 'faculty' &&
           String(fac.empid||'').trim() !== loggedEmpid &&
@@ -183,9 +199,15 @@ router.delete('/:id',
         return res.status(403).json({ error: 'Insufficient permissions' });
       }
 
+      await deleteFile(fac.doc_appt);
+      await deleteFile(fac.doc_pan);
+      await deleteFile(fac.doc_aadhar);
+      await deleteFile(fac.doc_resume);
+
       let expCerts = [];
       try { expCerts = JSON.parse(fac.doc_exp_certs || '[]'); if (!Array.isArray(expCerts)) expCerts = []; }
       catch(e) { expCerts = []; }
+      for (const p of expCerts) await deleteFile(p);
 
       await pg('DELETE FROM faculty WHERE id = ?', [req.params.id]);
       res.json({ message: 'Faculty profile deleted' });
@@ -196,7 +218,6 @@ router.delete('/:id',
   }
 );
 
-// GET /api/faculty/:id/docs/:docType
 router.get('/:id/docs/:docType',
   requireRole('faculty','hod','iqac','iqac_dept','principal'),
   async (req, res) => {
@@ -213,21 +234,14 @@ router.get('/:id/docs/:docType',
         return res.status(400).json({ error: 'Invalid document type' });
 
       const filename = fac[req.params.docType];
-      if (!filename || filename === '—')
-        return res.status(404).json({ error: 'Document not uploaded' });
-
-      const filePath = path.join(process.env.UPLOAD_DIR || './uploads', filename);
-      if (!fs.existsSync(filePath))
-        return res.status(404).json({ error: 'File not found on server' });
-
-      res.download(filePath, filename);
+      return downloadToResponse(filename, res, `${fac.empid || 'faculty'}-${req.params.docType}`);
     } catch (err) {
+      console.error(err);
       res.status(500).json({ error: 'Failed to download document' });
     }
   }
 );
 
-// DELETE /api/faculty/:id/docs/:docType
 router.delete('/:id/docs/:docType',
   requireRole('faculty','hod','iqac','iqac_dept','principal'),
   async (req, res) => {
@@ -246,10 +260,7 @@ router.delete('/:id/docs/:docType',
         return res.status(403).json({ error: 'Insufficient permissions' });
 
       const filename = fac[docType];
-      if (filename && filename !== '—') {
-        const filePath = path.join(process.env.UPLOAD_DIR || './uploads', filename);
-        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-      }
+      await deleteFile(filename);
 
       await pg(`UPDATE faculty SET ${docType} = '—' WHERE id = ?`, [id]);
       res.json({ message: 'Document deleted successfully' });

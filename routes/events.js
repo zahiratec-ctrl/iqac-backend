@@ -1,23 +1,22 @@
-// backend/routes/events.js  — PostgreSQL version
+// backend/routes/events.js — Supabase Storage version
 const express = require('express');
-const upload  = require('../middleware/upload');
-const db      = require('../db');
+const upload = require('../middleware/upload');
+const db = require('../db');
 const { authMiddleware } = require('../middleware/auth');
+const { uploadBuffer, downloadToResponse, deleteFile } = require('../utils/supabaseStorage');
 
 const router = express.Router();
 router.use(authMiddleware);
 
-// ── PostgreSQL placeholder helper ────────────────────────
 function pg(sql, params = []) {
   let i = 0;
   const pgSql = sql.replace(/\?/g, () => `$${++i}`);
   return db.query(pgSql, params);
 }
 
-// ── Scope helper ─────────────────────────────────────────
 function buildWhereClause(user, extraWhere = '') {
   const conditions = [];
-  const params     = [];
+  const params = [];
 
   if (user.role === 'iqac_dept') {
     conditions.push("status = 'Approved'");
@@ -38,7 +37,6 @@ function buildWhereClause(user, extraWhere = '') {
   return { where, params };
 }
 
-// ── GET /api/events ──────────────────────────────────────
 router.get('/', async (req, res) => {
   try {
     const { search, status } = req.query;
@@ -67,7 +65,6 @@ router.get('/', async (req, res) => {
   }
 });
 
-// ── GET /api/events/:id ──────────────────────────────────
 router.get('/:id', async (req, res) => {
   try {
     const result = await pg('SELECT * FROM events WHERE id = ?', [req.params.id]);
@@ -78,9 +75,8 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// ── POST /api/events ─────────────────────────────────────
 router.post('/', upload.fields([
-  { name: 'brochure',    maxCount: 1 },
+  { name: 'brochure', maxCount: 1 },
   { name: 'budget_file', maxCount: 1 }
 ]), async (req, res) => {
   try {
@@ -93,8 +89,18 @@ router.post('/', upload.fields([
     if (!name || !department || !type)
       return res.status(400).json({ error: 'name, department and type are required' });
 
-    const brochure    = req.files?.brochure?.[0]?.filename    || '—';
-    const budget_file = req.files?.budget_file?.[0]?.filename || '—';
+    let brochure = '—';
+    let budget_file = '—';
+
+    if (req.files?.brochure?.[0]) {
+      const stored = await uploadBuffer('events', req.files.brochure[0]);
+      brochure = stored.path;
+    }
+
+    if (req.files?.budget_file?.[0]) {
+      const stored = await uploadBuffer('events', req.files.budget_file[0]);
+      budget_file = stored.path;
+    }
 
     const initialStatus = department === 'IQAC' ? 'Pending Principal' : 'Pending HOD';
     const approvalMessage = department === 'IQAC'
@@ -121,18 +127,17 @@ router.post('/', upload.fields([
   }
 });
 
-// ── PATCH /api/events/:id/approve ────────────────────────
 router.patch('/:id/approve', async (req, res) => {
   try {
     const { remarks } = req.body;
     const result = await pg('SELECT * FROM events WHERE id = ?', [req.params.id]);
     if (!result.rows.length) return res.status(404).json({ error: 'Event not found' });
 
-    const ev   = result.rows[0];
+    const ev = result.rows[0];
     const role = req.user.role;
     const dept = req.user.department;
 
-    const flow    = { 'Pending HOD': 'Pending IQAC', 'Pending IQAC': 'Pending Principal', 'Pending Principal': 'Approved' };
+    const flow = { 'Pending HOD': 'Pending IQAC', 'Pending IQAC': 'Pending Principal', 'Pending Principal': 'Approved' };
     const allowed = { 'Pending HOD': 'hod', 'Pending IQAC': 'iqac', 'Pending Principal': 'principal' };
 
     if (allowed[ev.status] !== role)
@@ -142,7 +147,7 @@ router.patch('/:id/approve', async (req, res) => {
       return res.status(403).json({ error: 'You can only approve events from your department' });
 
     const remarkColumn = role === 'hod' ? 'hod_remarks' : role === 'iqac' ? 'iqac_remarks' : 'principal_remarks';
-    const nextStatus   = flow[ev.status] || 'Approved';
+    const nextStatus = flow[ev.status] || 'Approved';
     const finalRemarks = `${role.toUpperCase()} approved: ${remarks || 'No remarks'}`;
 
     await pg(
@@ -157,14 +162,13 @@ router.patch('/:id/approve', async (req, res) => {
   }
 });
 
-// ── PATCH /api/events/:id/reject ─────────────────────────
 router.patch('/:id/reject', async (req, res) => {
   try {
     const { remarks } = req.body;
     const result = await pg('SELECT * FROM events WHERE id = ?', [req.params.id]);
     if (!result.rows.length) return res.status(404).json({ error: 'Event not found' });
 
-    const ev   = result.rows[0];
+    const ev = result.rows[0];
     const role = req.user.role;
     const dept = req.user.department;
 
@@ -191,30 +195,36 @@ router.patch('/:id/reject', async (req, res) => {
   }
 });
 
-// ── GET /api/events/:id/docs/:type ───────────────────────
 router.get('/:id/docs/:type', async (req, res) => {
   try {
     const { id, type } = req.params;
-    const result = await pg('SELECT brochure_file, budget_file FROM events WHERE id = ?', [id]);
+    const result = await pg('SELECT brochure_file, budget_file, name FROM events WHERE id = ?', [id]);
 
     if (!result.rows.length) return res.status(404).json({ error: 'Event not found' });
 
-    const row      = result.rows[0];
-    const filename = type === 'brochure' ? row.brochure_file : type === 'budget' ? row.budget_file : null;
+    const row = result.rows[0];
+    const filePath = type === 'brochure' ? row.brochure_file : type === 'budget' ? row.budget_file : null;
 
-    if (!filename || filename === '—') return res.status(404).json({ error: 'Document not uploaded' });
+    if (!filePath || filePath === '—') return res.status(404).json({ error: 'Document not uploaded' });
 
-    const path = require('path');
-    const fs   = require('fs');
-    const filePath = path.join(process.env.UPLOAD_DIR || 'uploads', filename);
-
-    if (!fs.existsSync(filePath))
-      return res.status(404).json({ error: 'File missing on server. Please re-upload document.' });
-
-    return res.sendFile(path.resolve(filePath));
+    return downloadToResponse(filePath, res, `${row.name || 'event'}-${type}`);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Unable to view document' });
+  }
+});
+
+router.delete('/:id', async (req, res) => {
+  try {
+    const result = await pg('SELECT brochure_file, budget_file FROM events WHERE id = ?', [req.params.id]);
+    if (result.rows.length) {
+      await deleteFile(result.rows[0].brochure_file);
+      await deleteFile(result.rows[0].budget_file);
+    }
+    await pg('DELETE FROM events WHERE id = ?', [req.params.id]);
+    res.json({ message: 'Event deleted' });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to delete event' });
   }
 });
 

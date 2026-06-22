@@ -1,10 +1,9 @@
-// backend/routes/accreditations.js — PostgreSQL version
+// backend/routes/accreditations.js — Supabase Storage version
 const express = require('express');
-const path    = require('path');
-const fs      = require('fs');
-const db      = require('../db');
-const upload  = require('../middleware/upload');
+const db = require('../db');
+const upload = require('../middleware/upload');
 const { authMiddleware, requireRole } = require('../middleware/auth');
+const { uploadBuffer, downloadToResponse, deleteFile } = require('../utils/supabaseStorage');
 
 const router = express.Router();
 router.use(authMiddleware);
@@ -42,7 +41,7 @@ router.post('/:category/upload',
   async (req, res) => {
     try {
       const category = String(req.params.category || '').toUpperCase();
-      const title    = req.body.title;
+      const title = req.body.title;
 
       if (!['NBA','NAAC','NIRF'].includes(category))
         return res.status(400).json({ error: 'Invalid accreditation category' });
@@ -50,11 +49,14 @@ router.post('/:category/upload',
       if (!title || !req.file)
         return res.status(400).json({ error: 'Title and file are required' });
 
+      const stored = await uploadBuffer('accreditations', req.file);
+
       await pg(
         `INSERT INTO accreditation_files (category, title, file_name, uploaded_by)
          VALUES ($1,$2,$3,$4)`,
-        [category, title, req.file.filename, req.user.empid || '—']
+        [category, title, stored.path, req.user.empid || '—']
       );
+
       res.status(201).json({ message: 'Accreditation file uploaded successfully' });
     } catch (err) {
       console.error(err);
@@ -71,11 +73,8 @@ router.get('/download/:id',
       const result = await pg('SELECT * FROM accreditation_files WHERE id = $1', [req.params.id]);
       if (!result.rows.length) return res.status(404).json({ error: 'File record not found' });
 
-      const file     = result.rows[0];
-      const filePath = path.join(process.env.UPLOAD_DIR || './uploads', file.file_name);
-      if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'File not found on server' });
-
-      res.download(filePath, file.file_name);
+      const file = result.rows[0];
+      return downloadToResponse(file.file_name, res, file.title || 'accreditation-file');
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: 'Failed to download accreditation file' });
@@ -91,9 +90,8 @@ router.delete('/:id',
       const result = await pg('SELECT * FROM accreditation_files WHERE id = $1', [req.params.id]);
       if (!result.rows.length) return res.status(404).json({ error: 'File record not found' });
 
-      const file     = result.rows[0];
-      const filePath = path.join(process.env.UPLOAD_DIR || './uploads', file.file_name);
-      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+      const file = result.rows[0];
+      await deleteFile(file.file_name);
 
       await pg('DELETE FROM accreditation_files WHERE id = $1', [req.params.id]);
       res.json({ message: 'Accreditation file deleted successfully' });

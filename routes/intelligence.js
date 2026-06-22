@@ -16,6 +16,60 @@ const PROGRAM_INTAKE = {
   Humanities: 0, Physics: 0, Chemistry: 0, Maths: 0, IQAC: 0
 };
 
+const REQUIRED_NORMS = {
+  CSE:  { faculty: 18, prof: 2, assoc: 4, phd_percent: 30 },
+  ISE:  { faculty: 6,  prof: 1, assoc: 2, phd_percent: 30 },
+  ECE:  { faculty: 12, prof: 1, assoc: 3, phd_percent: 30 },
+  AIML: { faculty: 6,  prof: 1, assoc: 2, phd_percent: 30 },
+  ME:   { faculty: 4,  prof: 1, assoc: 1, phd_percent: 30 },
+  Humanities: { faculty: 0, prof: 0, assoc: 0, phd_percent: 30 },
+  Physics:    { faculty: 0, prof: 0, assoc: 0, phd_percent: 30 },
+  Chemistry:  { faculty: 0, prof: 0, assoc: 0, phd_percent: 30 },
+  Maths:      { faculty: 0, prof: 0, assoc: 0, phd_percent: 30 },
+  IQAC:       { faculty: 0, prof: 0, assoc: 0, phd_percent: 30 }
+};
+
+function requiredNormFor(dept) {
+  return REQUIRED_NORMS[dept] || { faculty: 0, prof: 0, assoc: 0, phd_percent: 30 };
+}
+
+function positiveGap(required, existing) {
+  return Math.max(0, safeNum(required) - safeNum(existing));
+}
+
+function computeComplianceScore(row) {
+  const norms = requiredNormFor(row.department);
+  let score = 0;
+
+  if (!norms.faculty || row.total_faculty >= norms.faculty) score += 25;
+  else if (norms.faculty) score += Math.round((row.total_faculty / norms.faculty) * 25);
+
+  if (!norms.prof || row.prof_count >= norms.prof) score += 10;
+  else if (norms.prof) score += Math.round((row.prof_count / norms.prof) * 10);
+
+  if (!norms.assoc || row.assoc_count >= norms.assoc) score += 10;
+  else if (norms.assoc) score += Math.round((row.assoc_count / norms.assoc) * 10);
+
+  if (row.phd_percent >= norms.phd_percent) score += 15;
+  else score += Math.round((row.phd_percent / norms.phd_percent) * 15);
+
+  if (row.total_events >= 3) score += 10;
+  else score += Math.round((row.total_events / 3) * 10);
+
+  if (row.attended_count >= row.total_faculty && row.total_faculty > 0) score += 10;
+  else if (row.total_faculty > 0) score += Math.round((row.attended_count / row.total_faculty) * 10);
+
+  const nbaCount = (row.criterion_coverage?.nba || []).length;
+  const naacCount = (row.criterion_coverage?.naac || []).length;
+  score += Math.min(10, nbaCount * 2);
+  score += Math.min(10, naacCount * 2);
+
+  if (row.missing_docs === 0) score += 10;
+  else score += Math.max(0, 10 - Math.min(10, row.missing_docs));
+
+  return Math.max(0, Math.min(100, score));
+}
+
 function safeNum(v) { return Number(v || 0); }
 
 function getFSR(intake, faculty) {
@@ -173,6 +227,19 @@ async function buildDepartmentRow(dept) {
   if (row.attended_count >= row.total_faculty && row.total_faculty > 0) score += 10;
   row.quality_score = score;
 
+
+  const norms = requiredNormFor(row.department);
+  row.required_faculty = norms.faculty;
+  row.faculty_shortfall = positiveGap(norms.faculty, row.total_faculty);
+  row.required_prof_count = norms.prof;
+  row.prof_shortfall = positiveGap(norms.prof, row.prof_count);
+  row.required_assoc_count = norms.assoc;
+  row.assoc_shortfall = positiveGap(norms.assoc, row.assoc_count);
+  row.required_phd_percent = norms.phd_percent;
+  row.phd_gap = positiveGap(norms.phd_percent, row.phd_percent);
+  row.compliance_score = computeComplianceScore(row);
+  row.quality_score = row.compliance_score;
+
   return row;
 }
 
@@ -274,6 +341,354 @@ router.get('/my-contribution', async (req, res) => {
   } catch (err) {
     console.error('My contribution error:', err);
     res.status(500).json({ error: 'Failed to generate faculty contribution report', details: err.message });
+  }
+});
+
+
+// ══ QUANTITATIVE INTELLIGENCE REPORT WORKFLOW ══
+
+// GET /api/intelligence/faculty-contribution
+router.get('/faculty-contribution', async (req, res) => {
+  try {
+    let role = String(req.user?.role || '').trim().toLowerCase();
+    let department = String(req.user?.department || '').trim();
+
+    if (!['hod','iqac_dept'].includes(role)) {
+      return res.status(403).json({ error: 'Only HOD / IQAC department coordinator can view faculty contribution matrix.' });
+    }
+
+    if (!department || department === '—') {
+      return res.status(400).json({ error: 'Department not found in login token.' });
+    }
+
+    const facRes = await pg(`
+      SELECT empid, name, email, department, designation, qualification, teaching_exp,
+             doc_appt, doc_pan, doc_aadhar, doc_resume
+      FROM faculty
+      WHERE department = ?
+      ORDER BY name ASC, empid ASC
+    `, [department]);
+
+    const rows = [];
+
+    for (const f of facRes.rows) {
+      const empid = f.empid;
+
+      const evRes = await pg(`
+        SELECT type, COUNT(*) AS cnt
+        FROM events
+        WHERE submitted_by = ?
+        GROUP BY type
+      `, [empid]);
+
+      const attRes = await pg(`
+        SELECT event_type, COUNT(*) AS cnt
+        FROM events_attended
+        WHERE submitted_by = ?
+        GROUP BY event_type
+      `, [empid]);
+
+      let organized_count = 0;
+      let attended_count = 0;
+      const nbaSet = new Set();
+      const naacSet = new Set();
+
+      evRes.rows.forEach(e => {
+        organized_count += safeNum(e.cnt);
+        getNbaMappingByEventType(e.type).forEach(x => nbaSet.add(x));
+        getNaacMappingByEventType(e.type).forEach(x => naacSet.add(x));
+      });
+
+      attRes.rows.forEach(a => {
+        attended_count += safeNum(a.cnt);
+        getNbaMappingByEventType(a.event_type).forEach(x => nbaSet.add(x));
+        getNaacMappingByEventType(a.event_type).forEach(x => naacSet.add(x));
+      });
+
+      let missing_docs = 0;
+      ['doc_appt','doc_pan','doc_aadhar','doc_resume'].forEach(k => {
+        if (!f[k] || f[k] === '—' || f[k] === '') missing_docs++;
+      });
+
+      let score = 0;
+      if (organized_count > 0) score += 30;
+      if (attended_count > 0) score += 30;
+      if (String(f.qualification || '').toLowerCase().includes('ph')) score += 15;
+      if (missing_docs === 0) score += 15;
+      if (nbaSet.size >= 2 && naacSet.size >= 2) score += 10;
+
+      rows.push({
+        empid: f.empid,
+        name: f.name,
+        email: f.email,
+        department: f.department,
+        designation: f.designation,
+        qualification: f.qualification,
+        organized_count,
+        attended_count,
+        missing_docs,
+        nba: Array.from(nbaSet),
+        naac: Array.from(naacSet),
+        contribution_score: score
+      });
+    }
+
+    res.json(rows);
+  } catch (err) {
+    console.error('Faculty contribution intelligence error:', err);
+    res.status(500).json({ error: 'Failed to generate faculty contribution matrix', details: err.message });
+  }
+});
+
+// POST /api/intelligence/reports
+router.post('/reports', async (req, res) => {
+  try {
+    let role = String(req.user?.role || '').trim().toLowerCase();
+
+    if (!['iqac','principal','hod','iqac_dept'].includes(role)) {
+      return res.status(403).json({ error: 'Only IQAC, Principal and HOD roles can save reports.' });
+    }
+
+    const {
+      report_type,
+      scope,
+      department,
+      remarks,
+      summary_json,
+      visible_to
+    } = req.body || {};
+
+    if (!remarks) {
+      return res.status(400).json({ error: 'Remarks are required.' });
+    }
+
+    const result = await db.query(`
+      INSERT INTO intelligence_reports
+        (report_type, scope, department, generated_by, remarks, summary_json, visible_to)
+      VALUES ($1,$2,$3,$4,$5,$6,$7)
+      RETURNING *
+    `, [
+      report_type || 'Intelligence Report',
+      scope || 'institution',
+      department || req.user.department || null,
+      req.user.empid || req.user.email || role,
+      remarks,
+      summary_json || {},
+      visible_to || (['hod','iqac_dept'].includes(role) ? 'faculty' : 'hod')
+    ]);
+
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    console.error('Save intelligence report error:', err);
+    res.status(500).json({ error: 'Failed to save intelligence report', details: err.message });
+  }
+});
+
+// GET /api/intelligence/reports
+router.get('/reports', async (req, res) => {
+  try {
+    let role = String(req.user?.role || '').trim().toLowerCase();
+    let department = String(req.user?.department || '').trim();
+
+    const visible_to = String(req.query.visible_to || '').trim();
+    const qDept = String(req.query.department || '').trim();
+
+    let sql = `SELECT id, report_type, scope, department, generated_by, remarks, visible_to, created_at
+               FROM intelligence_reports WHERE 1=1`;
+    const params = [];
+
+    if (visible_to) {
+      params.push(visible_to);
+      sql += ` AND visible_to = $${params.length}`;
+    }
+
+    if (['hod','iqac_dept','faculty'].includes(role)) {
+      const dept = qDept || department;
+      if (dept && dept !== '—') {
+        params.push(dept);
+        sql += ` AND (department = $${params.length} OR department IS NULL OR department = '')`;
+      }
+    }
+
+    sql += ` ORDER BY created_at DESC LIMIT 20`;
+
+    const result = await db.query(sql, params);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Fetch intelligence reports error:', err);
+    res.status(500).json({ error: 'Failed to fetch intelligence reports', details: err.message });
+  }
+});
+
+
+// POST /api/intelligence/faculty-remark
+// HOD / IQAC department coordinator sends a remark to one faculty only.
+router.post('/faculty-remark', async (req, res) => {
+  try {
+    const role = String(req.user?.role || '').trim().toLowerCase();
+    if (!['hod','iqac_dept'].includes(role)) {
+      return res.status(403).json({ error: 'Only HOD / IQAC department coordinator can send faculty remarks.' });
+    }
+
+    const empid = String(req.body?.empid || '').trim();
+    const remark = String(req.body?.remark || '').trim();
+
+    if (!empid || !remark) {
+      return res.status(400).json({ error: 'Faculty Employee ID and remark are required.' });
+    }
+
+    const department = String(req.user?.department || '').trim();
+
+    const fRes = await pg(
+      `SELECT empid, name, department FROM faculty WHERE empid = ? LIMIT 1`,
+      [empid]
+    );
+
+    if (!fRes.rows.length) {
+      return res.status(404).json({ error: 'Faculty profile not found.' });
+    }
+
+    const faculty = fRes.rows[0];
+
+    if (department && department !== '—' && faculty.department !== department) {
+      return res.status(403).json({ error: 'You can send remarks only to faculty in your department.' });
+    }
+
+    const result = await db.query(`
+      INSERT INTO faculty_remarks
+        (empid, faculty_name, department, remark, remark_by)
+      VALUES ($1,$2,$3,$4,$5)
+      RETURNING *
+    `, [
+      faculty.empid,
+      faculty.name || faculty.empid,
+      faculty.department || department,
+      remark,
+      req.user.empid || req.user.email || role
+    ]);
+
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    console.error('Faculty remark error:', err);
+    res.status(500).json({ error: 'Failed to save faculty remark', details: err.message });
+  }
+});
+
+// GET /api/intelligence/my-faculty-remarks
+// Faculty sees only remarks addressed to them.
+router.get('/my-faculty-remarks', async (req, res) => {
+  try {
+    const role = String(req.user?.role || '').trim().toLowerCase();
+    if (role !== 'faculty') {
+      return res.status(403).json({ error: 'Only faculty can view personal remarks.' });
+    }
+
+    const result = await db.query(`
+      SELECT id, empid, faculty_name, department, remark, remark_by, created_at
+      FROM faculty_remarks
+      WHERE empid = $1
+      ORDER BY created_at DESC
+      LIMIT 50
+    `, [req.user.empid]);
+
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Fetch faculty remarks error:', err);
+    res.status(500).json({ error: 'Failed to fetch faculty remarks', details: err.message });
+  }
+});
+
+// GET /api/intelligence/faculty-remarks
+// HOD can see remarks sent to their department faculty.
+router.get('/faculty-remarks', async (req, res) => {
+  try {
+    const role = String(req.user?.role || '').trim().toLowerCase();
+    if (!['hod','iqac_dept'].includes(role)) {
+      return res.status(403).json({ error: 'Only HOD / IQAC department coordinator can view faculty remarks.' });
+    }
+
+    const department = String(req.user?.department || '').trim();
+    const result = await db.query(`
+      SELECT id, empid, faculty_name, department, remark, remark_by, created_at
+      FROM faculty_remarks
+      WHERE department = $1
+      ORDER BY created_at DESC
+      LIMIT 100
+    `, [department]);
+
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Fetch department faculty remarks error:', err);
+    res.status(500).json({ error: 'Failed to fetch faculty remarks', details: err.message });
+  }
+});
+
+// POST /api/intelligence/department-remark
+// IQAC / Principal sends a remark to one department only.
+router.post('/department-remark', async (req, res) => {
+  try {
+    const role = String(req.user?.role || '').trim().toLowerCase();
+    if (!['iqac','principal'].includes(role)) {
+      return res.status(403).json({ error: 'Only IQAC Coordinator / Principal can send department remarks.' });
+    }
+
+    const department = String(req.body?.department || '').trim();
+    const remark = String(req.body?.remark || '').trim();
+
+    if (!department || !remark) {
+      return res.status(400).json({ error: 'Department and remark are required.' });
+    }
+
+    const result = await db.query(`
+      INSERT INTO department_remarks
+        (department, remark, remark_by)
+      VALUES ($1,$2,$3)
+      RETURNING *
+    `, [
+      department,
+      remark,
+      req.user.empid || req.user.email || role
+    ]);
+
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    console.error('Department remark error:', err);
+    res.status(500).json({ error: 'Failed to save department remark', details: err.message });
+  }
+});
+
+// GET /api/intelligence/department-remarks
+// HOD/faculty see their department remarks; IQAC/Principal can filter by department.
+router.get('/department-remarks', async (req, res) => {
+  try {
+    const role = String(req.user?.role || '').trim().toLowerCase();
+    let department = String(req.query.department || req.user?.department || '').trim();
+
+    let sql = `
+      SELECT id, department, remark, remark_by, created_at
+      FROM department_remarks
+      WHERE 1=1
+    `;
+    const params = [];
+
+    if (!['iqac','principal'].includes(role)) {
+      if (!department || department === '—') {
+        return res.status(400).json({ error: 'Department not found.' });
+      }
+      params.push(department);
+      sql += ` AND department = $${params.length}`;
+    } else if (department && department !== 'All') {
+      params.push(department);
+      sql += ` AND department = $${params.length}`;
+    }
+
+    sql += ` ORDER BY created_at DESC LIMIT 100`;
+
+    const result = await db.query(sql, params);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Fetch department remarks error:', err);
+    res.status(500).json({ error: 'Failed to fetch department remarks', details: err.message });
   }
 });
 

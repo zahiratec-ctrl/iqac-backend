@@ -6,20 +6,17 @@ const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
 
-
 const app = express();
 const PORT = process.env.PORT || 8080;
 
-// ── CORS CONFIGURATION (UPDATED FOR VERCEL) ─────────────────
-// Read allowed origins from environment variable (comma-separated)
+// ── CORS CONFIGURATION ───────────────────────────────────
 const envOrigins = (process.env.CLIENT_ORIGIN || '')
   .split(',')
   .map(s => s.trim().replace(/\/$/, ''))
   .filter(Boolean);
 
-// Define all allowed origins
 const allowedOrigins = [
-  ...envOrigins,                // <-- Your Vercel URL will go here
+  ...envOrigins,
   'http://localhost:3000',
   'http://localhost:5000',
   'http://localhost:5500',
@@ -28,40 +25,125 @@ const allowedOrigins = [
 
 const corsOptions = {
   origin: function(origin, callback) {
-  if (!origin) return callback(null, true);
+    if (!origin) return callback(null, true);
 
-  const normalizedOrigin = origin.replace(/\/$/, '');
+    const normalizedOrigin = origin.replace(/\/$/, '');
 
-  if (allowedOrigins.includes(normalizedOrigin)) {
-    return callback(null, true);
-  }
+    if (
+      allowedOrigins.includes(normalizedOrigin) ||
+      normalizedOrigin.endsWith('.vercel.app')
+    ) {
+      return callback(null, true);
+    }
 
-  callback(new Error(`CORS blocked: ${origin}`));
-},
+    callback(new Error(`CORS blocked: ${origin}`));
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 };
 
-// Apply CORS middleware globally
 app.use(cors(corsOptions));
-// Handle preflight requests explicitly
 app.options('*', cors(corsOptions));
 
 // ── BODY PARSERS ─────────────────────────────────────────
 app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true, limit: '20mb' }));
 
-// ── UPLOADS ──────────────────────────────────────────────
-const uploadDir = process.env.UPLOAD_DIR || path.join(__dirname, 'uploads');
+// ── UPLOADS / DOWNLOADS ──────────────────────────────────
+// IMPORTANT FOR RENDER:
+// Add a Render Persistent Disk mounted at /var/data
+// and set env variable UPLOAD_DIR=/var/data/uploads
+//
+// If you do not add a Persistent Disk, uploaded files will disappear after redeploy.
+const persistentUploadDir = process.env.UPLOAD_DIR || path.join(__dirname, 'uploads');
+const localUploadDir = path.join(__dirname, 'uploads');
 
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
+function ensureUploadStorage() {
+  fs.mkdirSync(persistentUploadDir, { recursive: true });
+
+  // Many route files write to backend/uploads.
+  // This symlink makes those routes write into the persistent disk automatically.
+  try {
+    if (persistentUploadDir !== localUploadDir) {
+      if (fs.existsSync(localUploadDir)) {
+        const stat = fs.lstatSync(localUploadDir);
+        if (!stat.isSymbolicLink()) {
+          fs.mkdirSync(localUploadDir, { recursive: true });
+        }
+      } else {
+        fs.symlinkSync(persistentUploadDir, localUploadDir, 'dir');
+        console.log(`Uploads symlink created: ${localUploadDir} -> ${persistentUploadDir}`);
+      }
+    } else {
+      fs.mkdirSync(localUploadDir, { recursive: true });
+    }
+  } catch (err) {
+    console.warn('Upload symlink warning:', err.message);
+    fs.mkdirSync(localUploadDir, { recursive: true });
+  }
+
+  // Standard subfolders used by different modules
+  ['formats', 'faculty', 'attended', 'events', 'accreditations'].forEach(folder => {
+    try { fs.mkdirSync(path.join(localUploadDir, folder), { recursive: true }); } catch {}
+    try { fs.mkdirSync(path.join(persistentUploadDir, folder), { recursive: true }); } catch {}
+  });
 }
 
-app.use('/uploads', express.static(uploadDir));
+ensureUploadStorage();
 
-// ── API ROUTES ───────────────────────────────────────────
+// Serve uploaded files publicly when the app stores /uploads/... paths
+app.use('/uploads', express.static(localUploadDir));
+app.use('/uploads', express.static(persistentUploadDir));
+
+// Safe fallback download endpoint for stored paths.
+// Example: /api/file?path=/uploads/formats/a.pdf
+app.get('/api/file', (req, res) => {
+  try {
+    let requested = String(req.query.path || '').trim();
+
+    if (!requested) {
+      return res.status(400).json({ error: 'File path is required' });
+    }
+
+    requested = requested.replace(/\\/g, '/');
+
+    let candidate;
+
+    if (requested.startsWith('/uploads/')) {
+      candidate = path.join(localUploadDir, requested.replace('/uploads/', ''));
+    } else if (requested.startsWith('uploads/')) {
+      candidate = path.join(localUploadDir, requested.replace('uploads/', ''));
+    } else if (path.isAbsolute(requested)) {
+      candidate = requested;
+    } else {
+      candidate = path.join(localUploadDir, requested);
+    }
+
+    const normalized = path.normalize(candidate);
+
+    // Safety: only allow files inside localUploadDir or persistentUploadDir
+    const allowedA = path.normalize(localUploadDir);
+    const allowedB = path.normalize(persistentUploadDir);
+
+    if (!normalized.startsWith(allowedA) && !normalized.startsWith(allowedB)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    if (!fs.existsSync(normalized)) {
+      return res.status(404).json({
+        error: 'File not found on server. If this file was uploaded before the last Render redeploy, it may have been lost because no Persistent Disk was attached.'
+      });
+    }
+
+    return res.download(normalized);
+
+  } catch (err) {
+    console.error('File download error:', err);
+    return res.status(500).json({ error: 'Unable to download file' });
+  }
+});
+
 // ── API ROUTES ───────────────────────────────────────────
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/events', require('./routes/events'));
@@ -112,7 +194,8 @@ app.use((err, _req, res, _next) => {
 });
 
 // ── START SERVER ─────────────────────────────────────────
-console.log('SERVER RESTORED — CORS FIX APPLIED');
+console.log('SERVER RESTORED — CORS + PERSISTENT UPLOAD FIX APPLIED');
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`IQAC Portal running on port ${PORT}`);
+  console.log(`Upload directory: ${persistentUploadDir}`);
 });
