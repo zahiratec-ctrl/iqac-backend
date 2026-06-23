@@ -1,4 +1,4 @@
-// backend/routes/events.js — Supabase Storage version
+// backend/routes/events.js — Supabase Storage + closed-loop edit/reply version
 const express = require('express');
 const upload = require('../middleware/upload');
 const db = require('../db');
@@ -12,6 +12,31 @@ function pg(sql, params = []) {
   let i = 0;
   const pgSql = sql.replace(/\?/g, () => `$${++i}`);
   return db.query(pgSql, params);
+}
+
+function roleOf(req) {
+  return String(req.user?.role || '').toLowerCase();
+}
+
+function canEditEvent(req, ev) {
+  const role = roleOf(req);
+  if (['iqac', 'principal'].includes(role)) return true;
+  if (['hod', 'iqac_dept'].includes(role) && req.user.department && req.user.department === ev.department) return true;
+  return String(ev.submitted_by || '') === String(req.user.empid || '');
+}
+
+async function addThread(recordId, req, action, message, toRole = null) {
+  if (!message && !action) return;
+  try {
+    await pg(
+      `INSERT INTO iqac_remark_threads
+        (record_type, record_id, action, message, from_role, to_role, created_by, created_by_empid)
+       VALUES (?,?,?,?,?,?,?,?)`,
+      ['event', recordId, action || '', message || '', roleOf(req), toRole || '', req.user.email || req.user.empid || '', req.user.empid || '']
+    );
+  } catch (err) {
+    console.warn('Event thread insert warning:', err.message);
+  }
 }
 
 function buildWhereClause(user, extraWhere = '') {
@@ -69,9 +94,34 @@ router.get('/:id', async (req, res) => {
   try {
     const result = await pg('SELECT * FROM events WHERE id = ?', [req.params.id]);
     if (!result.rows.length) return res.status(404).json({ error: 'Event not found' });
-    res.json(result.rows[0]);
+
+    const ev = result.rows[0];
+    if (roleOf(req) === 'faculty' && String(ev.submitted_by) !== String(req.user.empid))
+      return res.status(403).json({ error: 'Insufficient permissions' });
+
+    res.json(ev);
   } catch (err) {
     res.status(500).json({ error: 'Failed to fetch event' });
+  }
+});
+
+router.get('/:id/thread', async (req, res) => {
+  try {
+    const evRes = await pg('SELECT * FROM events WHERE id = ?', [req.params.id]);
+    if (!evRes.rows.length) return res.status(404).json({ error: 'Event not found' });
+    const ev = evRes.rows[0];
+    if (!canEditEvent(req, ev) && roleOf(req) === 'faculty') return res.status(403).json({ error: 'Insufficient permissions' });
+
+    const result = await pg(
+      `SELECT * FROM iqac_remark_threads
+       WHERE record_type = 'event' AND record_id = ?
+       ORDER BY created_at ASC`,
+      [req.params.id]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Event thread fetch error:', err);
+    res.status(500).json({ error: 'Failed to fetch remark thread' });
   }
 });
 
@@ -120,10 +170,120 @@ router.post('/', upload.fields([
        budget_rows || '[]', initialStatus, req.user.empid]
     );
 
+    await addThread(result.rows[0].id, req, 'Submitted', 'Event requisition submitted for approval.', department === 'IQAC' ? 'principal' : 'hod');
+
     res.status(201).json({ id: result.rows[0].id, message: approvalMessage });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to create event' });
+  }
+});
+
+// PUT /api/events/:id — edit data and/or re-upload documents
+router.put('/:id', upload.fields([
+  { name: 'brochure', maxCount: 1 },
+  { name: 'budget_file', maxCount: 1 }
+]), async (req, res) => {
+  try {
+    const oldRes = await pg('SELECT * FROM events WHERE id = ?', [req.params.id]);
+    if (!oldRes.rows.length) return res.status(404).json({ error: 'Event not found' });
+    const old = oldRes.rows[0];
+
+    if (!canEditEvent(req, old)) return res.status(403).json({ error: 'Insufficient permissions' });
+
+    const {
+      name, department, type, beneficiary, participants,
+      event_date, academic_year, coordinator, remarks,
+      budget_total, budget_rows, faculty_reply
+    } = req.body;
+
+    let brochure = old.brochure_file || '—';
+    let budget_file = old.budget_file || '—';
+
+    if (req.files?.brochure?.[0]) {
+      const stored = await uploadBuffer('events', req.files.brochure[0]);
+      await deleteFile(old.brochure_file);
+      brochure = stored.path;
+    }
+
+    if (req.files?.budget_file?.[0]) {
+      const stored = await uploadBuffer('events', req.files.budget_file[0]);
+      await deleteFile(old.budget_file);
+      budget_file = stored.path;
+    }
+
+    const submittedByOwner = String(old.submitted_by || '') === String(req.user.empid || '');
+    let nextStatus = old.status;
+
+    // If faculty edits a rejected/remarked record, reopen the workflow.
+    if (submittedByOwner && ['Rejected', 'Faculty Replied', 'Resubmitted'].includes(String(old.status))) {
+      nextStatus = (department || old.department) === 'IQAC' ? 'Pending Principal' : 'Pending HOD';
+    }
+
+    await pg(
+      `UPDATE events SET
+        name = ?, department = ?, type = ?, beneficiary = ?, participants = ?,
+        event_date = ?, academic_year = ?, coordinator = ?, remarks = ?,
+        brochure_file = ?, budget_file = ?, budget_total = ?, budget_rows = ?,
+        status = ?
+       WHERE id = ?`,
+      [
+        name || old.name,
+        department || old.department,
+        type || old.type,
+        beneficiary || old.beneficiary,
+        parseInt(participants) || old.participants || 0,
+        event_date || old.event_date,
+        academic_year || old.academic_year,
+        coordinator || old.coordinator,
+        remarks ?? old.remarks ?? '',
+        brochure,
+        budget_file,
+        parseFloat(budget_total) || old.budget_total || 0,
+        budget_rows || old.budget_rows || '[]',
+        nextStatus,
+        old.id
+      ]
+    );
+
+    await addThread(old.id, req, 'Edited/Reuploaded', faculty_reply || 'Event data/documents updated and resubmitted.', 'reviewer');
+
+    res.json({ message: 'Event updated successfully', status: nextStatus });
+  } catch (err) {
+    console.error('Event update error:', err);
+    res.status(500).json({ error: 'Failed to update event' });
+  }
+});
+
+// POST /api/events/:id/reply — faculty reply to remarks
+router.post('/:id/reply', async (req, res) => {
+  try {
+    const { message } = req.body || {};
+    if (!message || !String(message).trim()) return res.status(400).json({ error: 'Reply message is required' });
+
+    const result = await pg('SELECT * FROM events WHERE id = ?', [req.params.id]);
+    if (!result.rows.length) return res.status(404).json({ error: 'Event not found' });
+
+    const ev = result.rows[0];
+    const isOwner = String(ev.submitted_by || '') === String(req.user.empid || '');
+    if (!isOwner && !['hod','iqac','principal'].includes(roleOf(req)))
+      return res.status(403).json({ error: 'Insufficient permissions' });
+
+    let nextStatus = ev.status;
+    if (isOwner) {
+      nextStatus = ev.department === 'IQAC' ? 'Pending Principal' : 'Pending HOD';
+      await pg(
+        `UPDATE events SET status = ?, final_remarks = ? WHERE id = ?`,
+        [nextStatus, `Faculty replied/resubmitted: ${message}`, ev.id]
+      );
+    }
+
+    await addThread(ev.id, req, isOwner ? 'Faculty Reply / Resubmission' : 'Reviewer Remark', message, isOwner ? 'reviewer' : 'faculty');
+
+    res.json({ message: 'Reply saved successfully', status: nextStatus });
+  } catch (err) {
+    console.error('Event reply error:', err);
+    res.status(500).json({ error: 'Failed to save reply' });
   }
 });
 
@@ -155,6 +315,8 @@ router.patch('/:id/approve', async (req, res) => {
       [nextStatus, remarks || '', finalRemarks, ev.id]
     );
 
+    if (remarks) await addThread(ev.id, req, 'Approval Remark', remarks, 'faculty');
+
     res.json({ message: `Event moved to: ${nextStatus}`, status: nextStatus, remarks: finalRemarks });
   } catch (err) {
     console.error(err);
@@ -181,14 +343,16 @@ router.patch('/:id/reject', async (req, res) => {
       return res.status(403).json({ error: 'You can only reject events from your department' });
 
     const remarkColumn = role === 'hod' ? 'hod_remarks' : role === 'iqac' ? 'iqac_remarks' : 'principal_remarks';
-    const finalRemarks = `${role.toUpperCase()} rejected: ${remarks || 'No remarks'}`;
+    const finalRemarks = `${role.toUpperCase()} returned/rejected: ${remarks || 'No remarks'}`;
 
     await pg(
       `UPDATE events SET status = 'Rejected', ${remarkColumn} = ?, rejected_by = ?, final_remarks = ? WHERE id = ?`,
       [remarks || '', role, finalRemarks, ev.id]
     );
 
-    res.json({ message: 'Event rejected', status: 'Rejected', remarks: finalRemarks });
+    await addThread(ev.id, req, 'Returned with Remarks', remarks || 'Returned for correction.', 'faculty');
+
+    res.json({ message: 'Event returned/rejected', status: 'Rejected', remarks: finalRemarks });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to reject event' });
@@ -216,12 +380,18 @@ router.get('/:id/docs/:type', async (req, res) => {
 
 router.delete('/:id', async (req, res) => {
   try {
-    const result = await pg('SELECT brochure_file, budget_file FROM events WHERE id = ?', [req.params.id]);
-    if (result.rows.length) {
-      await deleteFile(result.rows[0].brochure_file);
-      await deleteFile(result.rows[0].budget_file);
-    }
+    const result = await pg('SELECT * FROM events WHERE id = ?', [req.params.id]);
+    if (!result.rows.length) return res.status(404).json({ error: 'Event not found' });
+
+    const ev = result.rows[0];
+    if (!canEditEvent(req, ev)) return res.status(403).json({ error: 'Insufficient permissions' });
+
+    await deleteFile(ev.brochure_file);
+    await deleteFile(ev.budget_file);
+
     await pg('DELETE FROM events WHERE id = ?', [req.params.id]);
+    await pg(`DELETE FROM iqac_remark_threads WHERE record_type = 'event' AND record_id = ?`, [req.params.id]);
+
     res.json({ message: 'Event deleted' });
   } catch (err) {
     res.status(500).json({ error: 'Failed to delete event' });
