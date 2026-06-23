@@ -117,14 +117,39 @@ router.post('/', authMiddleware, iqacOnly, upload.single('formatFile'), async (r
 });
 
 // GET /api/formats/:id/download
-router.get('/:id/download', authMiddleware, async (req, res) => {
+router.get('/:id/download', async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM iqac_formats WHERE id = $1', [req.params.id]);
+    const jwt = require('jsonwebtoken');
 
-    if (!result.rows.length) return res.status(404).json({ error: 'File not found' });
+    const token =
+      req.query.token ||
+      (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')
+        ? req.headers.authorization.slice(7)
+        : null);
+
+    if (!token) {
+      return res.status(401).json({ error: 'No token provided' });
+    }
+
+    jwt.verify(token, process.env.JWT_SECRET);
+
+    const result = await pool.query(
+      'SELECT * FROM iqac_formats WHERE id = $1',
+      [req.params.id]
+    );
+
+    if (!result.rows.length) {
+      return res.status(404).json({ error: 'File not found' });
+    }
 
     const file = result.rows[0];
-    return downloadToResponse(file.file_path || file.filename, res, file.original_name || file.title || 'format');
+
+    return downloadToResponse(
+      file.file_path || file.filename,
+      res,
+      file.original_name || file.title || 'format'
+    );
+
   } catch (err) {
     console.error('Format download error:', err);
     res.status(500).json({ error: 'Unable to download format' });
