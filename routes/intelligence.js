@@ -25,6 +25,10 @@ function positiveGap(required, existing) {
   return Math.max(0, safeNum(required) - safeNum(existing));
 }
 
+function roleOf(req) {
+  return String(req.user?.role || '').trim().toLowerCase();
+}
+
 const CORE_DEPTS = ['CSE', 'ISE', 'ECE', 'AIML', 'ME'];
 const BASIC_DEPTS = ['Maths', 'Physics', 'Chemistry', 'Humanities'];
 
@@ -122,6 +126,45 @@ async function ensureDepartmentIntakeTable() {
       ON CONFLICT (department) DO NOTHING
     `, [r.department, r.y1, r.y2, r.y3, r.y4, r.y1, r.is_core ? 4 : 1, r.is_core]);
   }
+}
+
+
+async function ensureIntelligenceSupportTables() {
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS intelligence_reports (
+      id SERIAL PRIMARY KEY,
+      report_type VARCHAR(100),
+      scope VARCHAR(100),
+      department VARCHAR(100),
+      generated_by VARCHAR(100),
+      remarks TEXT,
+      summary_json JSONB DEFAULT '{}'::jsonb,
+      visible_to VARCHAR(50),
+      created_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS faculty_remarks (
+      id SERIAL PRIMARY KEY,
+      empid VARCHAR(100),
+      faculty_name VARCHAR(255),
+      department VARCHAR(100),
+      remark TEXT,
+      remark_by VARCHAR(100),
+      created_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS department_remarks (
+      id SERIAL PRIMARY KEY,
+      department VARCHAR(100),
+      remark TEXT,
+      remark_by VARCHAR(100),
+      created_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
 }
 
 async function getIntakeRows() {
@@ -465,10 +508,11 @@ function computeComplianceScore(row) {
     score += Math.round((row.assoc_count / row.required_assoc_count) * 10);
   }
 
-  if (row.phd_percent >= row.required_phd_percent) {
+  // Ph.D score is based on required Ph.D count, not existing-faculty percentage.
+  if (!row.required_phd_count || row.phd_count >= row.required_phd_count) {
     score += 15;
   } else {
-    score += Math.round((row.phd_percent / row.required_phd_percent) * 15);
+    score += Math.round((row.phd_count / row.required_phd_count) * 15);
   }
 
   const eventGapCount = (row.event_gap_analysis?.gaps || []).filter(g => g.gap > 0).length;
@@ -529,7 +573,7 @@ async function buildDepartmentRow(dept, intakeMap, institutionalFirstYearIntake)
         '—' AS doc_pan,
         '—' AS doc_aadhar,
         '—' AS doc_resume,
-        'user_role' AS source_type
+        'user_login_role' AS source_type
       FROM users u
       WHERE u.department = ?
         AND LOWER(u.role) IN ('hod','iqac','iqac_dept')
@@ -674,6 +718,7 @@ async function buildDepartmentRow(dept, intakeMap, institutionalFirstYearIntake)
 // GET /api/intelligence/department-report
 router.get('/department-report', async (req, res) => {
   try {
+    await ensureIntelligenceSupportTables();
     let role = String(req.user?.role || '').trim().toLowerCase();
     let department = normalizeDept(req.user?.department || '');
 
@@ -698,6 +743,8 @@ router.get('/department-report', async (req, res) => {
         SELECT DISTINCT department FROM events WHERE department IS NOT NULL AND department <> '—'
         UNION
         SELECT DISTINCT department FROM events_attended WHERE department IS NOT NULL AND department <> '—'
+        UNION
+        SELECT DISTINCT department FROM users WHERE department IS NOT NULL AND department <> '—' AND department <> '-'
         UNION
         SELECT department FROM department_intake
       `);
@@ -899,13 +946,44 @@ router.get('/faculty-contribution', async (req, res) => {
       return res.status(400).json({ error: 'Department not found in login token.' });
     }
 
+    // Include HOD/IQAC Department Coordinator in faculty contribution list if profile is not separately added.
     const facRes = await pg(`
-      SELECT empid, name, email, department, designation, qualification, teaching_exp,
-             doc_appt, doc_pan, doc_aadhar, doc_resume
-      FROM faculty
-      WHERE department = ?
+      WITH faculty_list AS (
+        SELECT empid, name, email, department, designation, qualification, teaching_exp,
+               doc_appt, doc_pan, doc_aadhar, doc_resume
+        FROM faculty
+        WHERE department = ?
+
+        UNION ALL
+
+        SELECT
+          u.empid,
+          COALESCE(u.email, u.empid) AS name,
+          u.email,
+          u.department,
+          CASE
+            WHEN LOWER(u.role) = 'hod' THEN 'HOD'
+            WHEN LOWER(u.role) = 'iqac_dept' THEN 'IQAC Department Coordinator'
+            ELSE u.role
+          END AS designation,
+          '' AS qualification,
+          0 AS teaching_exp,
+          '—' AS doc_appt,
+          '—' AS doc_pan,
+          '—' AS doc_aadhar,
+          '—' AS doc_resume
+        FROM users u
+        WHERE u.department = ?
+          AND LOWER(u.role) IN ('hod','iqac_dept')
+          AND NOT EXISTS (
+            SELECT 1 FROM faculty f
+            WHERE f.empid = u.empid
+          )
+      )
+      SELECT *
+      FROM faculty_list
       ORDER BY name ASC, empid ASC
-    `, [department]);
+    `, [department, department]);
 
     const rows = [];
 
@@ -989,6 +1067,7 @@ router.get('/faculty-contribution', async (req, res) => {
 // POST /api/intelligence/reports
 router.post('/reports', async (req, res) => {
   try {
+    await ensureIntelligenceSupportTables();
     let role = String(req.user?.role || '').trim().toLowerCase();
 
     if (!['iqac', 'principal', 'hod', 'iqac_dept'].includes(role)) {
@@ -1029,6 +1108,7 @@ router.post('/reports', async (req, res) => {
 // GET /api/intelligence/reports
 router.get('/reports', async (req, res) => {
   try {
+    await ensureIntelligenceSupportTables();
     let role = String(req.user?.role || '').trim().toLowerCase();
     let department = normalizeDept(req.user?.department || '');
 
@@ -1068,6 +1148,7 @@ router.get('/reports', async (req, res) => {
 // POST /api/intelligence/faculty-remark
 router.post('/faculty-remark', async (req, res) => {
   try {
+    await ensureIntelligenceSupportTables();
     const role = String(req.user?.role || '').trim().toLowerCase();
 
     if (!['hod', 'iqac_dept'].includes(role)) {
@@ -1124,6 +1205,7 @@ router.post('/faculty-remark', async (req, res) => {
 // GET /api/intelligence/my-faculty-remarks
 router.get('/my-faculty-remarks', async (req, res) => {
   try {
+    await ensureIntelligenceSupportTables();
     const role = String(req.user?.role || '').trim().toLowerCase();
 
     if (role !== 'faculty') {
@@ -1151,6 +1233,7 @@ router.get('/my-faculty-remarks', async (req, res) => {
 // GET /api/intelligence/faculty-remarks
 router.get('/faculty-remarks', async (req, res) => {
   try {
+    await ensureIntelligenceSupportTables();
     const role = String(req.user?.role || '').trim().toLowerCase();
 
     if (!['hod', 'iqac_dept'].includes(role)) {
@@ -1180,6 +1263,7 @@ router.get('/faculty-remarks', async (req, res) => {
 // POST /api/intelligence/department-remark
 router.post('/department-remark', async (req, res) => {
   try {
+    await ensureIntelligenceSupportTables();
     const role = String(req.user?.role || '').trim().toLowerCase();
 
     if (!['iqac', 'principal'].includes(role)) {
@@ -1217,6 +1301,7 @@ router.post('/department-remark', async (req, res) => {
 // GET /api/intelligence/department-remarks
 router.get('/department-remarks', async (req, res) => {
   try {
+    await ensureIntelligenceSupportTables();
     const role = String(req.user?.role || '').trim().toLowerCase();
     let department = normalizeDept(req.query.department || req.user?.department || '');
 
