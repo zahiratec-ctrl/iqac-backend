@@ -258,7 +258,8 @@ function computeNorms(dept, intakeInfo, institutionalFirstYearIntake) {
       required_faculty_nba_25: required25,
       required_prof_count: Math.max(1, Math.ceil(required / NORMS.professor_ratio)),
       required_assoc_count: Math.max(1, Math.ceil(required / NORMS.associate_ratio)),
-      required_phd_percent: NORMS.phd_percent
+      required_phd_percent: NORMS.phd_percent,
+      required_phd_count: Math.ceil((required * NORMS.phd_percent) / 100)
     };
   }
 
@@ -282,7 +283,8 @@ function computeNorms(dept, intakeInfo, institutionalFirstYearIntake) {
       required_faculty_nba_25: required,
       required_prof_count: normalized === 'Maths' ? 1 : 0,
       required_assoc_count: Math.ceil(required / 4),
-      required_phd_percent: NORMS.phd_percent
+      required_phd_percent: NORMS.phd_percent,
+      required_phd_count: Math.ceil((required * NORMS.phd_percent) / 100)
     };
   }
 
@@ -295,7 +297,8 @@ function computeNorms(dept, intakeInfo, institutionalFirstYearIntake) {
     required_faculty_nba_25: 0,
     required_prof_count: 0,
     required_assoc_count: 0,
-    required_phd_percent: NORMS.phd_percent
+    required_phd_percent: NORMS.phd_percent,
+    required_phd_count: 0
   };
 }
 
@@ -426,7 +429,7 @@ function buildRecommendations(row) {
     rec.push(`Add/identify ${row.assoc_shortfall} Associate Professor level faculty for cadre balance.`);
   }
   if (row.phd_gap > 0) {
-    rec.push(`Improve Ph.D faculty percentage by ${row.phd_gap}% to meet minimum ${row.required_phd_percent}% benchmark.`);
+    rec.push(`Add/identify ${row.phd_gap} Ph.D-qualified faculty. Required Ph.D faculty = ${row.required_phd_count} (${row.required_phd_percent}% of required faculty).`);
   }
   if (row.event_gap_analysis?.suggested_events?.length) {
     rec.push(...row.event_gap_analysis.suggested_events.slice(0, 5));
@@ -498,21 +501,57 @@ async function buildDepartmentRow(dept, intakeMap, institutionalFirstYearIntake)
     is_core: CORE_DEPTS.includes(department)
   };
 
+  // Faculty count includes HOD/IQAC Coordinator from users table when their profile is not separately present in faculty table.
   const facRes = await pg(`
+    WITH faculty_base AS (
+      SELECT
+        empid, name, department, designation, qualification, teaching_exp,
+        doc_appt, doc_pan, doc_aadhar, doc_resume,
+        'faculty_profile' AS source_type
+      FROM faculty
+      WHERE department = ?
+
+      UNION ALL
+
+      SELECT
+        u.empid,
+        COALESCE(u.email, u.empid) AS name,
+        u.department,
+        CASE
+          WHEN LOWER(u.role) = 'hod' THEN 'HOD'
+          WHEN LOWER(u.role) = 'iqac' THEN 'IQAC Coordinator'
+          WHEN LOWER(u.role) = 'iqac_dept' THEN 'IQAC Department Coordinator'
+          ELSE u.role
+        END AS designation,
+        '' AS qualification,
+        0 AS teaching_exp,
+        '—' AS doc_appt,
+        '—' AS doc_pan,
+        '—' AS doc_aadhar,
+        '—' AS doc_resume,
+        'user_role' AS source_type
+      FROM users u
+      WHERE u.department = ?
+        AND LOWER(u.role) IN ('hod','iqac','iqac_dept')
+        AND NOT EXISTS (
+          SELECT 1 FROM faculty f
+          WHERE f.empid = u.empid
+        )
+    )
     SELECT
-      COUNT(*) AS total_faculty,
+      COUNT(DISTINCT empid) AS total_faculty,
       SUM(CASE WHEN designation ILIKE '%Professor%' AND designation NOT ILIKE '%Associate%' AND designation NOT ILIKE '%Assistant%' THEN 1 ELSE 0 END) AS prof_count,
       SUM(CASE WHEN designation ILIKE '%Associate%' THEN 1 ELSE 0 END) AS assoc_count,
       SUM(CASE WHEN designation ILIKE '%Assistant%' THEN 1 ELSE 0 END) AS asst_count,
-      SUM(CASE WHEN qualification ILIKE '%ph%' THEN 1 ELSE 0 END) AS phd_count,
-      AVG(teaching_exp) AS avg_teaching_exp,
-      SUM(CASE WHEN doc_appt IN ('—','') OR doc_appt IS NULL
+      SUM(CASE WHEN qualification ILIKE '%ph%' OR qualification ILIKE '%doctor%' THEN 1 ELSE 0 END) AS phd_count,
+      AVG(NULLIF(teaching_exp,0)) AS avg_teaching_exp,
+      SUM(CASE WHEN source_type = 'faculty_profile' AND
+                 (doc_appt IN ('—','') OR doc_appt IS NULL
                  OR doc_pan IN ('—','') OR doc_pan IS NULL
                  OR doc_aadhar IN ('—','') OR doc_aadhar IS NULL
-                 OR doc_resume IN ('—','') OR doc_resume IS NULL
+                 OR doc_resume IN ('—','') OR doc_resume IS NULL)
                THEN 1 ELSE 0 END) AS missing_docs
-    FROM faculty
-    WHERE department = ?`, [department]);
+    FROM faculty_base`, [department, department]);
 
   const fac = facRes.rows[0] || {};
 
@@ -585,7 +624,11 @@ async function buildDepartmentRow(dept, intakeMap, institutionalFirstYearIntake)
     assoc_count: safeNum(fac.assoc_count),
     asst_count: safeNum(fac.asst_count),
     phd_count: phdCount,
-    phd_percent: totalFaculty ? Math.round((phdCount / totalFaculty) * 100) : 0,
+    required_phd_count: norms.required_phd_count,
+    // PhD compliance is calculated against required PhD count, not only existing faculty.
+    // Example: if ECE requires 36 faculty, required PhD = 11. If only 1 PhD exists, compliance = 9%, not 100%.
+    phd_percent: norms.required_phd_count ? Math.round((phdCount / norms.required_phd_count) * 100) : 0,
+    phd_percent_existing_faculty: totalFaculty ? Math.round((phdCount / totalFaculty) * 100) : 0,
     avg_teaching_exp: Math.round(safeNum(fac.avg_teaching_exp)),
     missing_docs: safeNum(fac.missing_docs),
 
@@ -598,7 +641,7 @@ async function buildDepartmentRow(dept, intakeMap, institutionalFirstYearIntake)
     required_assoc_count: norms.required_assoc_count,
     assoc_shortfall: positiveGap(norms.required_assoc_count, safeNum(fac.assoc_count)),
     required_phd_percent: norms.required_phd_percent,
-    phd_gap: positiveGap(norms.required_phd_percent, totalFaculty ? Math.round((phdCount / totalFaculty) * 100) : 0),
+    phd_gap: positiveGap(norms.required_phd_count, phdCount),
 
     total_events,
     attended_count,
@@ -1208,5 +1251,123 @@ router.get('/department-remarks', async (req, res) => {
     });
   }
 });
+
+
+function addMonths(date, months) {
+  const d = new Date(date);
+  if (Number.isNaN(d.getTime())) return null;
+  d.setMonth(d.getMonth() + months);
+  return d;
+}
+
+function daysUntil(date) {
+  if (!date) return null;
+  const today = new Date();
+  return Math.ceil((date.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+}
+
+function inferAccreditationCycle(file) {
+  const title = String(file.title || '').toLowerCase();
+  const category = String(file.category || '').toUpperCase();
+
+  if (category === 'NBA') {
+    if (title.includes('certificate') || title.includes('accredit')) {
+      return { months: 36, label: 'NBA accreditation validity / renewal cycle' };
+    }
+    if (title.includes('sar')) return { months: 12, label: 'NBA SAR annual update reminder' };
+    return { months: 12, label: 'NBA document annual review' };
+  }
+
+  if (category === 'NAAC') {
+    if (title.includes('aqar')) return { months: 12, label: 'NAAC AQAR yearly submission cycle' };
+    if (title.includes('ssr') || title.includes('certificate')) return { months: 60, label: 'NAAC accreditation cycle review' };
+    return { months: 12, label: 'NAAC document annual review' };
+  }
+
+  if (category === 'NIRF') return { months: 12, label: 'NIRF annual submission cycle' };
+
+  return { months: 12, label: 'Accreditation document annual review' };
+}
+
+// GET /api/intelligence/accreditation-timeline
+router.get('/accreditation-timeline', async (req, res) => {
+  try {
+    const role = String(req.user?.role || '').trim().toLowerCase();
+    const userDept = normalizeDept(req.user?.department || '');
+
+    if (!['iqac', 'principal', 'hod', 'iqac_dept'].includes(role)) {
+      return res.status(403).json({ error: 'Only IQAC, Principal and HOD roles can view accreditation timeline.' });
+    }
+
+    const result = await db.query(`
+      SELECT id, category, title, uploaded_by, uploaded_at
+      FROM accreditation_files
+      ORDER BY uploaded_at DESC, id DESC
+    `);
+
+    const rows = result.rows
+      .filter(f => {
+        if (['iqac', 'principal'].includes(role)) return true;
+        const t = String(f.title || '').toUpperCase();
+        // HOD sees common NAAC/NIRF plus files that mention their department.
+        return !userDept || userDept === '—' || t.includes(userDept) || ['NAAC','NIRF'].includes(String(f.category || '').toUpperCase());
+      })
+      .map(f => {
+        const cycle = inferAccreditationCycle(f);
+        const uploaded = f.uploaded_at ? new Date(f.uploaded_at) : new Date();
+        const due = addMonths(uploaded, cycle.months);
+        const warning = due ? addMonths(due, -6) : null;
+        const days = daysUntil(due);
+
+        let status = 'OK';
+        let priority = 'Normal';
+
+        if (days !== null && days < 0) {
+          status = 'Overdue';
+          priority = 'Critical';
+        } else if (days !== null && days <= 90) {
+          status = 'Due within 3 months';
+          priority = 'High';
+        } else if (days !== null && days <= 180) {
+          status = 'Due within 6 months';
+          priority = 'Medium';
+        }
+
+        return {
+          id: f.id,
+          category: f.category,
+          title: f.title,
+          uploaded_by: f.uploaded_by,
+          uploaded_at: f.uploaded_at,
+          cycle_basis: cycle.label,
+          reminder_start_date: warning ? warning.toISOString().slice(0, 10) : null,
+          due_date: due ? due.toISOString().slice(0, 10) : null,
+          days_remaining: days,
+          status,
+          priority,
+          reminder_message:
+            `${f.category} document "${f.title}" should be reviewed before ${due ? due.toISOString().slice(0, 10) : 'the due date'}. ` +
+            `Prepare/update supporting files, department data, events, faculty details and compliance proof.`
+        };
+      });
+
+    const summary = {
+      total_documents: rows.length,
+      overdue: rows.filter(r => r.status === 'Overdue').length,
+      due_3_months: rows.filter(r => r.status === 'Due within 3 months').length,
+      due_6_months: rows.filter(r => r.status === 'Due within 6 months').length,
+      normal: rows.filter(r => r.status === 'OK').length
+    };
+
+    res.json({ summary, reminders: rows });
+  } catch (err) {
+    console.error('Accreditation timeline intelligence error:', err);
+    res.status(500).json({
+      error: 'Failed to generate accreditation timeline intelligence',
+      details: err.message
+    });
+  }
+});
+
 
 module.exports = router;
