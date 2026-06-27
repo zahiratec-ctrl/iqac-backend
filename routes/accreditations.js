@@ -13,7 +13,23 @@ function pg(sql, params = []) {
   return db.query(sql.replace(/\?/g, () => `$${++i}`), params);
 }
 
-// GET /api/accreditations/:category
+// IMPORTANT: download route must come BEFORE /:category
+router.get('/download/:id',
+  requireRole('iqac','principal'),
+  async (req, res) => {
+    try {
+      const result = await pg('SELECT * FROM accreditation_files WHERE id = ?', [req.params.id]);
+      if (!result.rows.length) return res.status(404).json({ error: 'File record not found' });
+
+      const file = result.rows[0];
+      return downloadToResponse(file.file_name, res, file.title || 'accreditation-file');
+    } catch (err) {
+      console.error('Accreditation download error:', err);
+      res.status(500).json({ error: 'Failed to download accreditation file' });
+    }
+  }
+);
+
 router.get('/:category',
   requireRole('iqac','principal'),
   async (req, res) => {
@@ -23,7 +39,7 @@ router.get('/:category',
         return res.status(400).json({ error: 'Invalid accreditation category' });
 
       const result = await pg(
-        'SELECT * FROM accreditation_files WHERE category = $1 ORDER BY uploaded_at DESC',
+        'SELECT * FROM accreditation_files WHERE category = ? ORDER BY uploaded_at DESC',
         [category]
       );
       res.json(result.rows);
@@ -34,7 +50,6 @@ router.get('/:category',
   }
 );
 
-// POST /api/accreditations/:category/upload
 router.post('/:category/upload',
   requireRole('iqac','principal'),
   upload.single('file'),
@@ -53,7 +68,7 @@ router.post('/:category/upload',
 
       await pg(
         `INSERT INTO accreditation_files (category, title, file_name, uploaded_by)
-         VALUES ($1,$2,$3,$4)`,
+         VALUES (?,?,?,?)`,
         [category, title, stored.path, req.user.empid || '—']
       );
 
@@ -65,35 +80,17 @@ router.post('/:category/upload',
   }
 );
 
-// GET /api/accreditations/download/:id
-router.get('/download/:id',
-  requireRole('iqac','principal'),
-  async (req, res) => {
-    try {
-      const result = await pg('SELECT * FROM accreditation_files WHERE id = $1', [req.params.id]);
-      if (!result.rows.length) return res.status(404).json({ error: 'File record not found' });
-
-      const file = result.rows[0];
-      return downloadToResponse(file.file_name, res, file.title || 'accreditation-file');
-    } catch (err) {
-      console.error(err);
-      res.status(500).json({ error: 'Failed to download accreditation file' });
-    }
-  }
-);
-
-// DELETE /api/accreditations/:id
 router.delete('/:id',
   requireRole('iqac','principal'),
   async (req, res) => {
     try {
-      const result = await pg('SELECT * FROM accreditation_files WHERE id = $1', [req.params.id]);
+      const result = await pg('SELECT * FROM accreditation_files WHERE id = ?', [req.params.id]);
       if (!result.rows.length) return res.status(404).json({ error: 'File record not found' });
 
       const file = result.rows[0];
       await deleteFile(file.file_name);
 
-      await pg('DELETE FROM accreditation_files WHERE id = $1', [req.params.id]);
+      await pg('DELETE FROM accreditation_files WHERE id = ?', [req.params.id]);
       res.json({ message: 'Accreditation file deleted successfully' });
     } catch (err) {
       console.error(err);
