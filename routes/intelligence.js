@@ -562,10 +562,10 @@ async function buildDepartmentRow(dept, intakeMap, institutionalFirstYearIntake)
         COALESCE(u.email, u.empid) AS name,
         u.department,
         CASE
-          WHEN LOWER(u.role::text) = 'hod' THEN 'HOD'
-          WHEN LOWER(u.role::text) = 'iqac' THEN 'IQAC Coordinator'
-          WHEN LOWER(u.role::text) = 'iqac_dept' THEN 'IQAC Department Coordinator'
-          ELSE u.role
+          WHEN LOWER(CAST(u.role AS TEXT)) = 'hod' THEN 'HOD'
+          WHEN LOWER(CAST(u.role AS TEXT)) = 'iqac' THEN 'IQAC Coordinator'
+          WHEN LOWER(CAST(u.role AS TEXT)) = 'iqac_dept' THEN 'IQAC Department Coordinator'
+          ELSE CAST(u.role AS TEXT)
         END AS designation,
         '' AS qualification,
         0 AS teaching_exp,
@@ -576,7 +576,7 @@ async function buildDepartmentRow(dept, intakeMap, institutionalFirstYearIntake)
         'user_login_role' AS source_type
       FROM users u
       WHERE u.department = ?
-        AND LOWER(u.role::text) IN ('hod','iqac','iqac_dept')
+        AND LOWER(CAST(u.role AS TEXT)) IN ('hod','iqac','iqac_dept')
         AND NOT EXISTS (
           SELECT 1 FROM faculty f
           WHERE f.empid = u.empid
@@ -962,9 +962,9 @@ router.get('/faculty-contribution', async (req, res) => {
           u.email,
           u.department,
           CASE
-            WHEN LOWER(u.role::text) = 'hod' THEN 'HOD'
-            WHEN LOWER(u.role::text) = 'iqac_dept' THEN 'IQAC Department Coordinator'
-            ELSE u.role
+            WHEN LOWER(CAST(u.role AS TEXT)) = 'hod' THEN 'HOD'
+            WHEN LOWER(CAST(u.role AS TEXT)) = 'iqac_dept' THEN 'IQAC Department Coordinator'
+            ELSE CAST(u.role AS TEXT)
           END AS designation,
           '' AS qualification,
           0 AS teaching_exp,
@@ -974,7 +974,7 @@ router.get('/faculty-contribution', async (req, res) => {
           '—' AS doc_resume
         FROM users u
         WHERE u.department = ?
-          AND LOWER(u.role::text) IN ('hod','iqac_dept')
+          AND LOWER(CAST(u.role AS TEXT)) IN ('hod','iqac_dept')
           AND NOT EXISTS (
             SELECT 1 FROM faculty f
             WHERE f.empid = u.empid
