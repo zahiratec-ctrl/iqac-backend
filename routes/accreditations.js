@@ -14,6 +14,7 @@ function pg(sql, params = []) {
 }
 
 // IMPORTANT: download route must come BEFORE /:category
+// GET /api/accreditations/download/:id
 router.get('/download/:id',
   requireRole('iqac','principal'),
   async (req, res) => {
@@ -30,6 +31,7 @@ router.get('/download/:id',
   }
 );
 
+// GET /api/accreditations/:category
 router.get('/:category',
   requireRole('iqac','principal'),
   async (req, res) => {
@@ -44,12 +46,13 @@ router.get('/:category',
       );
       res.json(result.rows);
     } catch (err) {
-      console.error(err);
+      console.error('Accreditation fetch error:', err);
       res.status(500).json({ error: 'Failed to fetch accreditation files' });
     }
   }
 );
 
+// POST /api/accreditations/:category/upload
 router.post('/:category/upload',
   requireRole('iqac','principal'),
   upload.single('file'),
@@ -74,12 +77,13 @@ router.post('/:category/upload',
 
       res.status(201).json({ message: 'Accreditation file uploaded successfully' });
     } catch (err) {
-      console.error(err);
+      console.error('Accreditation upload error:', err);
       res.status(500).json({ error: 'Failed to upload accreditation file' });
     }
   }
 );
 
+// DELETE /api/accreditations/:id
 router.delete('/:id',
   requireRole('iqac','principal'),
   async (req, res) => {
@@ -93,7 +97,7 @@ router.delete('/:id',
       await pg('DELETE FROM accreditation_files WHERE id = ?', [req.params.id]);
       res.json({ message: 'Accreditation file deleted successfully' });
     } catch (err) {
-      console.error(err);
+      console.error('Accreditation delete error:', err);
       res.status(500).json({ error: 'Failed to delete accreditation file' });
     }
   }
